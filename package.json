@@ -1,8 +1,8 @@
 {
   "name": "server-nestjs",
-  "version": "0.0.1",
-  "description": "",
-  "author": "",
+  "version": "1.0.0",
+  "description": "A NestJS project!",
+  "author": "Eug",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {

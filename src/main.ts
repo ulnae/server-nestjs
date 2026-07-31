@@ -13,8 +13,7 @@ async function bootstrap() {
 
   const config = app.get(ConfigService);
   // 设置 api 访问前缀
-  const prefix = config.get('PREFIX');
-  app.setGlobalPrefix(prefix);
+  app.setGlobalPrefix(config.get('PREFIX') as string);
 
   // 注册全局 logger 拦截器
   const loggerService = app.get(LoggerService);
@@ -70,8 +69,8 @@ async function bootstrap() {
   // 配置 session
   app.use(
     session({
-      name: 'nestjs.sid',  // 自定义名称，不暴露技术栈
-      secret: 'your-secret-key',
+      name: config.get('SESSION_NAME'),  // 自定义名称，不暴露技术栈
+      secret: config.get('SESSION_SECRET') as string, // 用于签名 session ID 的密钥
       resave: false,
       saveUninitialized: false,
       cookie: {
@@ -89,6 +88,6 @@ async function bootstrap() {
     }),
   );
 
-  await app.listen(process.env.PORT ?? 3000);
+  await app.listen(config.get('PORT') as number);
 }
 bootstrap();
