@@ -2,11 +2,14 @@ import { OnGatewayInit, SubscribeMessage, WebSocketGateway, WebSocketServer } fr
 import type { OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
 import { Logger, UseGuards } from '@nestjs/common';
 import { Socket, Server } from 'socket.io';
+import { randomUUID } from 'crypto';
 import { WsJwtAuthGuard } from '@/socket/socket.guard'
 import { Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
+import { CallSession, CALL_RING_TIMEOUT, RtcSdpMessage, RtcCandidateMessage } from '@/socket/socket.interface'
+
 @WebSocketGateway({
   path: '/websocket',
   serveClient: true,
@@ -21,7 +24,12 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   @WebSocketServer() wss: Server;
 
   private logger: Logger = new Logger('SocketGateway');
+  // 在线用户：用户id -> socket
   private users = new Map<string, Socket>();
+  // 通话会话：通话id -> 会话
+  private calls = new Map<string, CallSession>();
+  // 用户通话索引：用户id -> 通话id（同一时刻只允许一通通话）
+  private userCallMap = new Map<string, string>();
 
   constructor(
     @InjectRepository(FriendEntity)
@@ -39,6 +47,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     if (!client.data.user) return
 
     if (this.users.get(client.data.user.id) && this.users.get(client.data.user.id)?.id == client.id) {
+      // 用户断线时，结束其进行中的通话并通知对方
+      this.handleDisconnectCalls(client.data.user.id);
       // 从用户房间中移除用户
       this.handleResigerRooms(client,'leave');
       // 获取当前用户所有好友，并通知当前用户已下线
@@ -192,4 +202,268 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       timestamp: Date.now() // 消息发送时间
     });
   }
+
+  // ======================== 语音通话信令 ========================
+
+  /**
+   * 释放通话资源（清除定时器、会话与用户索引）
+   */
+  private releaseCall(session: CallSession): void {
+    if (session.ringTimeout) {
+      clearTimeout(session.ringTimeout);
+      session.ringTimeout = null;
+    }
+    session.status = 'closed';
+    this.calls.delete(session.id);
+    if (this.userCallMap.get(session.caller) === session.id) {
+      this.userCallMap.delete(session.caller);
+    }
+    if (this.userCallMap.get(session.callee) === session.id) {
+      this.userCallMap.delete(session.callee);
+    }
+  }
+
+  /**
+   * 用户断线时结束其通话并通知对方
+   */
+  private handleDisconnectCalls(userId: string): void {
+    const callId = this.userCallMap.get(userId);
+    if (!callId) return;
+    const session = this.calls.get(callId);
+    if (!session) {
+      this.userCallMap.delete(userId);
+      return;
+    }
+
+    const isCaller = session.caller === userId;
+    const peerId = isCaller ? session.callee : session.caller;
+    const peer = this.users.get(peerId);
+
+    if (peer) {
+      if (session.status === 'ringing') {
+        // 振铃阶段断线：主叫离开通知被叫取消，被叫离开通知主叫拒绝
+        peer.emit(isCaller ? 'call:canceled' : 'call:rejected', {
+          callId,
+          reason: 'unavailable',
+          timestamp: Date.now(),
+        });
+      } else {
+        // 通话阶段断线：通知对方通话结束
+        peer.emit('call:ended', {
+          callId,
+          reason: 'offline',
+          timestamp: Date.now(),
+        });
+      }
+    }
+    this.releaseCall(session);
+  }
+
+  /**
+   * 主叫发起通话邀请（拨打）
+   */
+  @SubscribeMessage('call:invite')
+  handleCallInvite(client: Socket, payload: { to: string }): void {
+    const callerId = client.data.user.id;
+    const calleeId = payload?.to;
+
+    if (!calleeId || calleeId === callerId) {
+      client.emit('call:error', { to: calleeId, reason: 'invalid', timestamp: Date.now() });
+      return;
+    }
+
+    // 主叫自己已在通话中
+    if (this.userCallMap.has(callerId)) {
+      client.emit('call:error', { to: calleeId, reason: 'busy-self', timestamp: Date.now() });
+      return;
+    }
+
+    const callee = this.users.get(calleeId);
+    // 被叫不在线
+    if (!callee) {
+      client.emit('call:error', { to: calleeId, reason: 'offline', timestamp: Date.now() });
+      return;
+    }
+
+    // 被叫忙线中
+    if (this.userCallMap.has(calleeId)) {
+      client.emit('call:error', { to: calleeId, reason: 'busy', timestamp: Date.now() });
+      return;
+    }
+
+    const callId = randomUUID();
+    const session: CallSession = {
+      id: callId,
+      caller: callerId,
+      callee: calleeId,
+      status: 'ringing',
+      createdAt: Date.now(),
+      ringTimeout: null,
+    };
+    // 振铃超时自动结束
+    session.ringTimeout = setTimeout(() => {
+      const current = this.calls.get(callId);
+      if (!current || current.status !== 'ringing') return;
+      this.users.get(current.caller)?.emit('call:timeout', { callId, timestamp: Date.now() });
+      this.users.get(current.callee)?.emit('call:canceled', { callId, reason: 'timeout', timestamp: Date.now() });
+      this.releaseCall(current);
+      this.logger.log(`Call ${callId} timeout`);
+    }, CALL_RING_TIMEOUT);
+
+    this.calls.set(callId, session);
+    this.userCallMap.set(callerId, callId);
+    this.userCallMap.set(calleeId, callId);
+
+    // 通知被叫有来电
+    callee.emit('call:incoming', {
+      callId,
+      from: callerId,
+      username: client.data.user.username,
+      timestamp: Date.now(),
+    });
+    // 通知主叫正在振铃
+    client.emit('call:ringing', { callId, to: calleeId, timestamp: Date.now() });
+    this.logger.log(`Call ${callId} invite: ${callerId} -> ${calleeId}`);
+  }
+
+  /**
+   * 被叫接听通话
+   */
+  @SubscribeMessage('call:accept')
+  handleCallAccept(client: Socket, payload: { callId: string }): void {
+    const session = this.calls.get(payload?.callId);
+    if (!session || session.callee !== client.data.user.id || session.status !== 'ringing') {
+      client.emit('call:error', { callId: payload?.callId, reason: 'unavailable', timestamp: Date.now() });
+      return;
+    }
+
+    const caller = this.users.get(session.caller);
+    // 主叫已离开
+    if (!caller) {
+      this.releaseCall(session);
+      client.emit('call:ended', { callId: session.id, reason: 'offline', timestamp: Date.now() });
+      return;
+    }
+
+    if (session.ringTimeout) {
+      clearTimeout(session.ringTimeout);
+      session.ringTimeout = null;
+    }
+    session.status = 'active';
+    caller.emit('call:accepted', { callId: session.id, from: session.callee, timestamp: Date.now() });
+    this.logger.log(`Call ${session.id} accepted by ${session.callee}`);
+  }
+
+  /**
+   * 被叫拒绝通话
+   */
+  @SubscribeMessage('call:reject')
+  handleCallReject(client: Socket, payload: { callId: string }): void {
+    const session = this.calls.get(payload?.callId);
+    if (!session || session.callee !== client.data.user.id) return;
+
+    this.users.get(session.caller)?.emit('call:rejected', {
+      callId: session.id,
+      timestamp: Date.now(),
+    });
+    this.releaseCall(session);
+    this.logger.log(`Call ${session.id} rejected by ${session.callee}`);
+  }
+
+  /**
+   * 主叫取消通话（振铃阶段挂断）
+   */
+  @SubscribeMessage('call:cancel')
+  handleCallCancel(client: Socket, payload: { callId: string }): void {
+    const session = this.calls.get(payload?.callId);
+    if (!session || session.caller !== client.data.user.id) return;
+
+    this.users.get(session.callee)?.emit('call:canceled', {
+      callId: session.id,
+      timestamp: Date.now(),
+    });
+    this.releaseCall(session);
+    this.logger.log(`Call ${session.id} canceled by ${session.caller}`);
+  }
+
+  /**
+   * 任意一方结束通话（挂断）
+   */
+  @SubscribeMessage('call:end')
+  handleCallEnd(client: Socket, payload: { callId: string }): void {
+    const session = this.calls.get(payload?.callId);
+    if (!session) return;
+
+    const userId = client.data.user.id;
+    if (session.caller !== userId && session.callee !== userId) return;
+
+    const peerId = session.caller === userId ? session.callee : session.caller;
+    this.users.get(peerId)?.emit('call:ended', {
+      callId: session.id,
+      reason: 'hangup',
+      timestamp: Date.now(),
+    });
+    this.releaseCall(session);
+    this.logger.log(`Call ${session.id} ended by ${userId}`);
+  }
+
+  /**
+   * 转发 WebRTC Offer
+   */
+  @SubscribeMessage('webrtc:offer')
+  handleWebRtcOffer(client: Socket, payload: { callId: string; sdp: RtcSdpMessage }): void {
+    const peer = this.getCallPeer(client, payload?.callId);
+    if (!peer) return;
+    peer.socket.emit('webrtc:offer', {
+      callId: peer.session.id,
+      from: client.data.user.id,
+      sdp: payload.sdp,
+    });
+  }
+
+  /**
+   * 转发 WebRTC Answer
+   */
+  @SubscribeMessage('webrtc:answer')
+  handleWebRtcAnswer(client: Socket, payload: { callId: string; sdp: RtcSdpMessage }): void {
+    const peer = this.getCallPeer(client, payload?.callId);
+    if (!peer) return;
+    peer.socket.emit('webrtc:answer', {
+      callId: peer.session.id,
+      from: client.data.user.id,
+      sdp: payload.sdp,
+    });
+  }
+
+  /**
+   * 转发 WebRTC ICE Candidate
+   */
+  @SubscribeMessage('webrtc:candidate')
+  handleWebRtcCandidate(client: Socket, payload: { callId: string; candidate: RtcCandidateMessage }): void {
+    const peer = this.getCallPeer(client, payload?.callId);
+    if (!peer) return;
+    peer.socket.emit('webrtc:candidate', {
+      callId: peer.session.id,
+      from: client.data.user.id,
+      candidate: payload.candidate,
+    });
+  }
+
+  /**
+   * 校验当前用户属于通话且通话已接通，返回对方socket与会话
+   */
+  private getCallPeer(client: Socket, callId: string): { socket: Socket; session: CallSession } | null {
+    const session = this.calls.get(callId);
+    if (!session || session.status !== 'active') return null;
+
+    const userId = client.data.user.id;
+    if (session.caller !== userId && session.callee !== userId) return null;
+
+    const peerId = session.caller === userId ? session.callee : session.caller;
+    const peerSocket = this.users.get(peerId);
+    if (!peerSocket) return null;
+
+    return { socket: peerSocket, session };
+  }
+  // ======================== 语音通话信令 END ========================
 }
