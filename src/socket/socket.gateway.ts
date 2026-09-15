@@ -148,6 +148,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     const rooms = await this.memberRepository.find({
       where: {
         user_id: client.data.user.id,
+        isDeleted: false,
       },
       relations: ['room_info'],
     });
@@ -178,6 +179,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     const friends = await this.friendRepository.find({
       where: {
         creator: client.data.user.id,
+        isDeleted: false,
       },
     });
     const onlineFriends:string[] = [];

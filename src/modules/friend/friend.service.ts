@@ -16,7 +16,10 @@ export class FriendService {
   async create(createFriendDto: CreateFriendDto) {
     // 检查好友是否存在
     const friend = await this.friendRepository.findOne({
-      where: createFriendDto,
+      where: {
+        isDeleted: false,
+        ...createFriendDto,
+      },
     });
 
     if (friend) {
@@ -31,6 +34,7 @@ export class FriendService {
     return this.friendRepository.find({
       where: {
         creator,
+        isDeleted: false,
       },
       relations: ['friend_info', 'user_info'],
       select: {
