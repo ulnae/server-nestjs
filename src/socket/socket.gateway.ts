@@ -91,11 +91,11 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       timestamp: Date.now() // 消息发送时间
     });
     if (receiver) {
-      receiver.emit('user', msg); // 发送给指定用户
+      receiver.emit('message:user', msg); // 发送给指定用户
     } else {
       this.logger.error(`User ${message.sender} not found`);
     }
-    client.emit('sender', msg); // 回显给发送方
+    client.emit('message:sender', msg); // 回显给发送方
     // TODO 记录用户之间的消息记录 - 数据库
     // { message, sender: client.data.user.id, receiver: message.sender, timestamp: Date.now() }
   }
@@ -109,7 +109,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   @SubscribeMessage('room')
   handleMessageRoom(client: Socket, message: { room: string, message: string }): void {
     // client.to(message.room).emit('msg2client', message); // 发送给除了自己之外的房间内成员 - 群公告
-    this.wss.to(message.room).emit('room', Object.assign({}, message, {
+    this.wss.to(message.room).emit('message:room', Object.assign({}, message, {
       sender: client.data.user.id, // 发送方id
       timestamp: Date.now() // 消息发送时间
     })); // 发送给房间内所有成员包括自己
@@ -159,14 +159,14 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       // 获取当前房间所有成员
       const sockets = await this.wss.in(room.room_id).fetchSockets();
       // 通知房间内所有成员当前房间活跃用户
-      this.wss.to(room.room_id).emit('online', {
+      this.wss.to(room.room_id).emit('online:room', {
         room: room.room_id,
         users: sockets.map(socket => socket.data.user?.id),
         timestamp: Date.now() // 消息发送时间
       }); // 发送给房间内所有成员包括自己
 
       // 
-      client.emit(type, { room: room.room_id, message: `You have ${type} room: ${room.room_info.name}` });
+      // client.emit(type, { room: room.room_id, message: `You have ${type} room: ${room.room_info.name}` });
     });
   }
 
@@ -188,7 +188,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       const receiver = this.users.get(friend.friend_id);
       if (receiver) {
         onlineFriends.push(friend.friend_id);
-        receiver.emit('status', {
+        receiver.emit('status:firend', {
           friend: friend.creator,
           status,
           timestamp: Date.now() // 消息发送时间
@@ -199,7 +199,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     });
 
     // 如果是上线状态，通知当前用户所有在线好友
-    status && client.emit('onlineFriends', {
+    status && client.emit('online:friends', {
       users: onlineFriends,
       timestamp: Date.now() // 消息发送时间
     });

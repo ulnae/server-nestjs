@@ -68,7 +68,7 @@ export class CronService {
     try {
       this.logger.log(`每小时的任务执行了！`);
       // 在这里编写你的业务逻辑
-      this.socketGateway.wss.emit('alert', {
+      this.socketGateway.wss.emit('system:alert', {
         message: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
         sender: '整点播报',
         timestamp: Date.now()
@@ -92,7 +92,7 @@ export class CronService {
     try {
       this.logger.log(`工作日${time}的任务执行了！`);
       // 在这里编写你的业务逻辑
-      this.socketGateway.wss.emit('alert', {
+      this.socketGateway.wss.emit('system:alert', {
         message: '关电脑，撤！',
         sender: '下班提醒',
         timestamp: Date.now()
@@ -116,7 +116,7 @@ export class CronService {
     try {
       this.logger.log(`工作日${time}的任务执行了！`);
       // 在这里编写你的业务逻辑
-      this.socketGateway.wss.emit('alert', {
+      this.socketGateway.wss.emit('system:alert', {
         message: '开电脑，干！',
         sender: '上班提醒',
         timestamp: Date.now()

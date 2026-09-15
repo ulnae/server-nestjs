@@ -15,7 +15,7 @@ export class AlertController {
     @Post()
     @HttpCode(200)
     sendAlert(@Body() dto: { message: string, sender: string }) {
-        this.socketGateway.wss.emit('alert', {
+        this.socketGateway.wss.emit('system:alert', {
             sender: dto.sender ||'系统通知',
             message: dto.message,
             timestamp: Date.now()
