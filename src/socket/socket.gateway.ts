@@ -62,7 +62,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
-    client.emit('message', { message: `Welcome to the WebSocket server!`, timestamp: Date.now() });
+    client.emit('system:message', { message: `Welcome to the WebSocket server!`, timestamp: Date.now() });
   }
 
   /**   
@@ -70,7 +70,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * @param client 
    * @param message 
    */
-  @SubscribeMessage('message')
+  @SubscribeMessage('send:message')
   handleMessage(client: Socket, message: string): void {
     console.log('Message from client:', message);
   }
@@ -81,7 +81,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * @param client 
    * @param message 
    */
-  @SubscribeMessage('user')
+  @SubscribeMessage('send:user')
   handleMessageUser(client: Socket, message: { sender: string, message: string }): void {
     // 需要记录用户id和对应的client映射关系才能实现
     const receiver = this.users.get(message.sender);
@@ -106,7 +106,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * @param client 
    * @param message 
    */
-  @SubscribeMessage('room')
+  @SubscribeMessage('send:room')
   handleMessageRoom(client: Socket, message: { room: string, message: string }): void {
     // client.to(message.room).emit('msg2client', message); // 发送给除了自己之外的房间内成员 - 群公告
     this.wss.to(message.room).emit('message:room', Object.assign({}, message, {
