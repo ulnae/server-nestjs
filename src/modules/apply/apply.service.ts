@@ -215,6 +215,11 @@ export class ApplyService {
           user: { id: userId, username: apply.apply_user_info?.username },
         },
       );
+      if (updateApplyDto.status) {
+        // 双向补发在线状态：双方列表刚出现对方（REST 列表不带在线状态），
+        // 不补发的话对方即使在线也会一直显示离线
+        await this.socketGateway.pushUserStatus(apply.user_id);
+      }
     } else if (apply.room_id && apply.room_info) {
       this.socketGateway.sendToUser(apply.user_id, 'room:apply:result', {
         applyId: id,
@@ -230,6 +235,8 @@ export class ApplyService {
           { roomId: apply.room_id, userId: apply.user_id, member: apply.user_info },
           apply.user_id,
         );
+        // 成员列表刷新后补发一次在线名单：房间所有人（含新成员自己）的在线集合即时更新
+        await this.socketGateway.pushRoomOnline(apply.room_id);
       }
     }
 

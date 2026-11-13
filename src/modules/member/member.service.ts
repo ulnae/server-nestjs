@@ -47,6 +47,8 @@ export class MemberService {
       { roomId: createMemberDto.room_id, userId: createMemberDto.user_id, member: user },
       createMemberDto.user_id,
     );
+    // 新成员此刻多半在线，补发一次在线名单，避免所有人列表里他显示离线
+    await this.socketGateway.pushRoomOnline(createMemberDto.room_id);
 
     return saved;
   }
@@ -74,6 +76,8 @@ export class MemberService {
         room_info: {
           id: true,
           name: true,
+          // 前端房间列表/聊天页的房间信息来自这里，必须带出描述
+          description: true,
           createdAt: true,
           updatedAt: true,
           creator: true

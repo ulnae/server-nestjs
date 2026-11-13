@@ -246,6 +246,48 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     target.forEach(room => socket.join(room));
   }
 
+  /**
+   * 成员加入/退出后向房间全员补发当前在线名单（含新成员自己）。
+   * 否则新成员即使在线，也要等别人重连才能出现在在线集合里。
+   */
+  async pushRoomOnline(roomId: string): Promise<void> {
+    if (!roomId) return;
+    const sockets = await this.wss.in(roomId).fetchSockets();
+    this.wss.to(roomId).emit('online:room', {
+      room: roomId,
+      users: sockets.map(socket => socket.data.user?.id),
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * 好友关系变化后向双向补发当前在线状态。
+   * 双方好友列表里刚出现对方（REST 列表不带在线状态），不补发会一直显示离线。
+   */
+  async pushUserStatus(userId: string): Promise<void> {
+    if (!userId) return;
+    const online = this.users.has(userId);
+    const friends = await this.friendRepository.find({
+      where: { creator: userId, isDeleted: false },
+    });
+    for (const friend of friends) {
+      // 告诉好友我的当前状态
+      this.users.get(friend.friend_id)?.emit('status:firend', {
+        friend: userId,
+        status: online,
+        timestamp: Date.now(),
+      });
+      // 告诉我哪些好友当前在线
+      if (online && this.users.has(friend.friend_id)) {
+        this.users.get(userId)?.emit('status:firend', {
+          friend: friend.friend_id,
+          status: true,
+          timestamp: Date.now(),
+        });
+      }
+    }
+  }
+
   // ======================== 语音通话信令 ========================
 
   /**

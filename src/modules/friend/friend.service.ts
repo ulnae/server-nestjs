@@ -39,6 +39,8 @@ export class FriendService {
     this.socketGateway.sendToUser(createFriendDto.friend_id, 'friend:added', {
       user: { id: createFriendDto.creator, username: creator?.username },
     });
+    // 补发双向在线状态：双方列表刚出现对方，可能此刻就在线
+    await this.socketGateway.pushUserStatus(createFriendDto.creator);
     return saved;
   }
 
