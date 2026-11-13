@@ -67,11 +67,8 @@ export class MemberService {
         user_id: true,
         createdAt: true,
         user_info: {
-          username: true,
-          email: true,
           id: true,
-          createdAt: true,
-          updatedAt: true
+          username: true
         },
         room_info: {
           id: true,

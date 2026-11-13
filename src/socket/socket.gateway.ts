@@ -188,11 +188,14 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       const receiver = this.users.get(friend.friend_id);
       if (receiver) {
         onlineFriends.push(friend.friend_id);
-        receiver.emit('status:firend', {
+        const payload = {
           friend: friend.creator,
           status,
-          timestamp: Date.now() // 消息发送时间
-        }); // 发送给房间内所有成员包括自己
+          timestamp: Date.now()
+        };
+        // status:friend 为规范事件名，status:firend 是历史拼写，过渡期双发
+        receiver.emit('status:friend', payload);
+        receiver.emit('status:firend', payload);
       } else {
         this.logger.error(`User ${friend.friend_id} not found`);
       }
@@ -247,6 +250,15 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   }
 
   /**
+   * 查询某房间当前在线用户 id 列表（供聚合接口 /room/overview 使用）
+   */
+  async roomOnline(roomId: string): Promise<string[]> {
+    if (!roomId) return [];
+    const sockets = await this.wss.in(roomId).fetchSockets();
+    return sockets.map(socket => socket.data.user?.id).filter(Boolean);
+  }
+
+  /**
    * 成员加入/退出后向房间全员补发当前在线名单（含新成员自己）。
    * 否则新成员即使在线，也要等别人重连才能出现在在线集合里。
    */
@@ -271,19 +283,23 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       where: { creator: userId, isDeleted: false },
     });
     for (const friend of friends) {
-      // 告诉好友我的当前状态
-      this.users.get(friend.friend_id)?.emit('status:firend', {
+      // 告诉好友我的当前状态（status:friend 为规范事件名，过渡期双发旧拼写）
+      const mine = {
         friend: userId,
         status: online,
         timestamp: Date.now(),
-      });
+      };
+      this.users.get(friend.friend_id)?.emit('status:friend', mine);
+      this.users.get(friend.friend_id)?.emit('status:firend', mine);
       // 告诉我哪些好友当前在线
       if (online && this.users.has(friend.friend_id)) {
-        this.users.get(userId)?.emit('status:firend', {
+        const theirs = {
           friend: friend.friend_id,
           status: true,
           timestamp: Date.now(),
-        });
+        };
+        this.users.get(userId)?.emit('status:friend', theirs);
+        this.users.get(userId)?.emit('status:firend', theirs);
       }
     }
   }

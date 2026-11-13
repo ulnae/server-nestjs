@@ -45,6 +45,14 @@ export class RoomController {
   }
 
   @ApiOperation({
+    summary: '登录聚合拉取：我加入的房间 + 每房成员 + 每房在线名单',
+  })
+  @Get('/overview')
+  overview(@Req() request) {
+    return this.roomService.overview(request.user);
+  }
+
+  @ApiOperation({
     summary: '通过id查询房间',
   })
   @Get(':id')
