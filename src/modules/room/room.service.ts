@@ -7,9 +7,12 @@ import { RoomEntity } from '@/modules/room/entities/room.entity';
 import { UserInfo } from '@/modules/user/user.interface';
 import { RoomRo } from '@/modules/room/room.interface';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
+import { SocketGateway } from '@/socket/socket.gateway';
 
 @Injectable()
 export class RoomService {
+  constructor(private readonly socketGateway: SocketGateway) {}
+
   @InjectRepository(RoomEntity)
   private readonly roomRepository: Repository<RoomEntity>;
   @InjectRepository(MemberEntity)
@@ -23,6 +26,8 @@ export class RoomService {
       room_id: room.id,
       user_id: user.id,
     });
+    // 新房间要立刻进自己的房间订阅，否则紧接着发消息会被房间校验挡下
+    await this.socketGateway.syncUserRooms(user.id);
     return '创建房间成功';
   }
   async findMineAll(page: number = 1, pageSize: number = 10, user: UserInfo): Promise<RoomRo> {
@@ -161,7 +166,7 @@ export class RoomService {
     return room;
   }
 
-  async update(id: string, updateRoomDto: UpdateRoomDto) {
+  async update(id: string, updateRoomDto: UpdateRoomDto, operatorId?: string) {
     const room = await this.roomRepository.findOne({ 
       where: { 
         id, 
@@ -177,10 +182,16 @@ export class RoomService {
     updateRoomDto.description && (updateRoomDtoCopy.description = updateRoomDto.description);
     const updatePost = this.roomRepository.merge(room, updateRoomDtoCopy);
     await this.roomRepository.save(updatePost);
+
+    // 房间改名等变化要同步给房间内所有人
+    const updated = await this.findOne(id);
+    if (updated) {
+      this.socketGateway.sendToRoom(id, 'room:updated', { room: updated }, operatorId);
+    }
     return '更新房间成功'
   }
 
-  async remove(id: string) {
+  async remove(id: string, operatorId?: string) {
     const room = await this.roomRepository.findOne({ 
       where: { 
         id, 
@@ -191,10 +202,24 @@ export class RoomService {
     if (!room) {
       throw new HttpException(`id为${id}的房间不存在`, 401);
     }
+    if (operatorId && room.creator !== operatorId) {
+      throw new HttpException('只有群主可以解散房间', 401);
+    }
+
+    const roomName = room.name;
     room.isDeleted = true;
     await this.roomRepository.save(room);
     // 标记所有房间成员为已删除
     await this.memberRepository.update({ room_id: room.id }, { isDeleted: true });
+
+    // 解散房间：所有在线成员立刻收到通知，并把房间从订阅里摘掉
+    if (operatorId) {
+      this.socketGateway.sendToRoom(room.id, 'room:deleted', {
+        roomId: room.id,
+        roomName,
+        by: { id: operatorId },
+      });
+    }
     return '删除房间成功'
   }
 }

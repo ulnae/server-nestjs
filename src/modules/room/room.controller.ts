@@ -56,15 +56,15 @@ export class RoomController {
     summary: '通过id更新房间',
   })
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateRoomDto: UpdateRoomDto) {
-    return this.roomService.update(id, updateRoomDto);
+  update(@Param('id') id: string, @Body() updateRoomDto: UpdateRoomDto, @Req() request) {
+    return this.roomService.update(id, updateRoomDto, request.user?.id);
   }
 
   @ApiOperation({
     summary: '通过id删除房间',
   })
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.roomService.remove(id);
+  remove(@Param('id') id: string, @Req() request) {
+    return this.roomService.remove(id, request.user?.id);
   }
 }

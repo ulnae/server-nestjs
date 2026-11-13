@@ -16,8 +16,8 @@ export class MemberController {
     summary: '创建成员',
   })
   @Post()
-  create(@Body() createMemberDto: CreateMemberDto) {
-    return this.memberService.create(createMemberDto);
+  create(@Body() createMemberDto: CreateMemberDto, @Req() req) {
+    return this.memberService.create(createMemberDto, req.user?.id);
   }
 
   @ApiOperation({
@@ -33,7 +33,7 @@ export class MemberController {
     summary: '删除成员',
   })
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.memberService.remove(id);
+  remove(@Param('id') id: string, @Req() req) {
+    return this.memberService.remove(id, req.user?.id);
   }
 }

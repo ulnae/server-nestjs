@@ -205,6 +205,47 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     });
   }
 
+  // ======================== 业务事件推送 ========================
+  // apply / friend / member / room 模块完成写操作后调用下面三个方法，
+  // 事件名与 worker 侧（src/durable/hub.js）保持一致，前端只写一套监听。
+
+  /** 推给某个用户（在线才会收到） */
+  sendToUser(userId: string, event: string, data: any): void {
+    if (!userId) return;
+    this.users.get(userId)?.emit(event, data);
+  }
+
+  /** 推给某个房间的在线成员；excludeUserId 用于排除操作者自己 */
+  sendToRoom(roomId: string, event: string, data: any, excludeUserId?: string): void {
+    if (!roomId) return;
+    if (!excludeUserId) {
+      this.wss.to(roomId).emit(event, data);
+      return;
+    }
+    this.users.forEach((socket, userId) => {
+      if (userId === excludeUserId) return;
+      if (socket.rooms.has(roomId)) socket.emit(event, data);
+    });
+  }
+
+  /** 成员关系变化后同步房间订阅：新加入的能收消息，退出的收不到 */
+  async syncUserRooms(userId: string): Promise<void> {
+    if (!userId) return;
+    const socket = this.users.get(userId);
+    if (!socket) return;
+
+    const members = await this.memberRepository.find({
+      where: { user_id: userId, isDeleted: false },
+    });
+    const target = new Set((members || []).map(item => item.room_id));
+
+    socket.rooms.forEach((room: string) => {
+      if (room === socket.id) return;
+      if (!target.has(room)) socket.leave(room);
+    });
+    target.forEach(room => socket.join(room));
+  }
+
   // ======================== 语音通话信令 ========================
 
   /**
