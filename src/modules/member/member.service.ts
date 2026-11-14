@@ -8,6 +8,7 @@ import { RoomEntity } from '@/modules/room/entities/room.entity';
 import { UserEntity } from '@/modules/user/entities/user.entity';
 import { Repository } from 'typeorm';
 import { SocketGateway } from '@/socket/socket.gateway';
+import { Event } from '@/socket/events';
 
 @Injectable()
 export class MemberService {
@@ -38,13 +39,14 @@ export class MemberService {
 
     // 被拉进房间的人要立刻看到房间，并且能收到房间消息
     await this.socketGateway.syncUserRooms(createMemberDto.user_id);
-    this.socketGateway.sendToUser(createMemberDto.user_id, 'room:joined', {
-      room: { id: room.id, name: room.name, creator: room.creator },
+    this.socketGateway.sendToUser(createMemberDto.user_id, Event.ROOM_JOINED, {
+      roomId: room.id,
+      roomName: room.name,
     });
     this.socketGateway.sendToRoom(
       createMemberDto.room_id,
-      'member:joined',
-      { roomId: createMemberDto.room_id, userId: createMemberDto.user_id, member: user },
+      Event.MEMBER_JOINED,
+      { roomId: createMemberDto.room_id, userId: createMemberDto.user_id, username: user?.username },
       createMemberDto.user_id,
     );
     // 新成员此刻多半在线，补发一次在线名单，避免所有人列表里他显示离线
@@ -113,14 +115,15 @@ export class MemberService {
 
     if (isSelf) {
       // 主动退出：给自己回执并摘掉房间订阅
-      this.socketGateway.sendToUser(member.user_id, 'room:left', { roomId, roomName });
+      this.socketGateway.sendToUser(member.user_id, Event.ROOM_LEFT, { roomId, roomName });
       await this.socketGateway.syncUserRooms(member.user_id);
     } else {
       // 被踢：先通知原因，再摘掉房间订阅
-      this.socketGateway.sendToUser(member.user_id, 'room:kicked', {
+      this.socketGateway.sendToUser(member.user_id, Event.ROOM_KICKED, {
         roomId,
         roomName,
-        by: { id: operatorId, username: operator?.username },
+        byUserId: operatorId,
+        byUsername: operator?.username,
       });
       await this.socketGateway.syncUserRooms(member.user_id);
     }
@@ -128,11 +131,12 @@ export class MemberService {
     // 房间里的其他人：成员列表要减一
     this.socketGateway.sendToRoom(
       roomId,
-      'member:removed',
+      Event.MEMBER_REMOVED,
       {
         roomId,
         userId: member.user_id,
-        by: { id: operatorId, username: operator?.username },
+        byUserId: operatorId,
+        byUsername: operator?.username,
         reason: isSelf ? 'left' : 'kicked',
       },
       member.user_id,

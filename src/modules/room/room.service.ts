@@ -8,6 +8,7 @@ import { UserInfo } from '@/modules/user/user.interface';
 import { RoomRo } from '@/modules/room/room.interface';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
 import { SocketGateway } from '@/socket/socket.gateway';
+import { Event } from '@/socket/events';
 
 @Injectable()
 export class RoomService {
@@ -30,45 +31,6 @@ export class RoomService {
     await this.socketGateway.syncUserRooms(user.id);
     return '创建房间成功';
   }
-  async findMineAll(page: number = 1, pageSize: number = 10, user: UserInfo): Promise<RoomRo> {
-    // 前端从不翻页：不需要 count，直接 find 全量
-    const rows = await this.roomRepository.find({
-      skip: (page - 1) * pageSize, // 分页偏移量
-      take: pageSize, // 每页显示的记录数
-      where: {
-        creator: user.id,
-        isDeleted: false,
-        // user_info: {
-        //   isDeleted: false,
-        // }
-      },
-      order: {
-        createdAt: 'ASC',
-      },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        creator: true,
-        user_info: {
-          username: true,
-          email: true,
-          id: true,
-          createdAt: true,
-          updatedAt: true
-        },
-        createdAt: true,
-        updatedAt: true,
-      },
-      relations: ['user_info'],
-
-    });
-    return {
-      rows,
-      total: rows.length,
-    };
-  }
-
   async findAll(page: number = 1, pageSize: number = 10): Promise<RoomRo> {
     // 从数据库查询所有房间
     const [rows, total] = await this.roomRepository.findAndCount({
@@ -232,7 +194,7 @@ export class RoomService {
     // 房间改名等变化要同步给房间内所有人
     const updated = await this.findOne(id);
     if (updated) {
-      this.socketGateway.sendToRoom(id, 'room:updated', { room: updated }, operatorId);
+      this.socketGateway.sendToRoom(id, Event.ROOM_UPDATED, { room: updated });
     }
     return '更新房间成功'
   }
@@ -260,10 +222,10 @@ export class RoomService {
 
     // 解散房间：所有在线成员立刻收到通知，并把房间从订阅里摘掉
     if (operatorId) {
-      this.socketGateway.sendToRoom(room.id, 'room:deleted', {
+      this.socketGateway.sendToRoom(room.id, Event.ROOM_DELETED, {
         roomId: room.id,
         roomName,
-        by: { id: operatorId },
+        byUserId: operatorId,
       });
     }
     return '删除房间成功'

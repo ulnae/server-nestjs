@@ -9,6 +9,7 @@ import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
 import { RoomEntity } from '@/modules/room/entities/room.entity';
 import { SocketGateway } from '@/socket/socket.gateway';
+import { Event } from '@/socket/events';
 
 @Injectable()
 export class ApplyService {
@@ -43,13 +44,14 @@ export class ApplyService {
       relations: ['user_info', 'room_info', 'apply_user_info'],
     });
     if (createApplyDto.apply_user_id) {
-      this.socketGateway.sendToUser(createApplyDto.apply_user_id, 'friend:request', { apply: detail });
+      this.socketGateway.sendToUser(createApplyDto.apply_user_id, Event.FRIEND_REQUEST, { apply: detail });
     } else if (createApplyDto.room_id) {
       const room = await this.roomRepository.findOne({ where: { id: createApplyDto.room_id, isDeleted: false } });
       if (room) {
-        this.socketGateway.sendToUser(room.creator, 'room:apply', {
+        this.socketGateway.sendToUser(room.creator, Event.ROOM_APPLY, {
           apply: detail,
-          room: { id: room.id, name: room.name },
+          roomId: room.id,
+          roomName: room.name,
         });
       }
     }
@@ -208,11 +210,12 @@ export class ApplyService {
     if (apply.apply_user_id) {
       this.socketGateway.sendToUser(
         apply.user_id,
-        updateApplyDto.status ? 'friend:accepted' : 'friend:rejected',
+        updateApplyDto.status ? Event.FRIEND_ACCEPTED : Event.FRIEND_REJECTED,
         {
           applyId: id,
           status: !!updateApplyDto.status,
-          user: { id: userId, username: apply.apply_user_info?.username },
+          userId,
+          username: apply.apply_user_info?.username,
         },
       );
       if (updateApplyDto.status) {
@@ -221,18 +224,19 @@ export class ApplyService {
         await this.socketGateway.pushUserStatus(apply.user_id);
       }
     } else if (apply.room_id && apply.room_info) {
-      this.socketGateway.sendToUser(apply.user_id, 'room:apply:result', {
+      this.socketGateway.sendToUser(apply.user_id, Event.ROOM_APPLY_RESULT, {
         applyId: id,
         status: !!updateApplyDto.status,
-        room: { id: apply.room_info.id, name: apply.room_info.name },
+        roomId: apply.room_info.id,
+        roomName: apply.room_info.name,
       });
       if (updateApplyDto.status) {
         // 先同步房间订阅，再广播成员变化：保证新成员能收到后续房间消息
         await this.socketGateway.syncUserRooms(apply.user_id);
         this.socketGateway.sendToRoom(
           apply.room_id,
-          'member:joined',
-          { roomId: apply.room_id, userId: apply.user_id, member: apply.user_info },
+          Event.MEMBER_JOINED,
+          { roomId: apply.room_id, userId: apply.user_id, username: apply.user_info?.username },
           apply.user_id,
         );
         // 成员列表刷新后补发一次在线名单：房间所有人（含新成员自己）的在线集合即时更新
@@ -259,14 +263,14 @@ export class ApplyService {
 
     // 撤回后接收方的待办要立刻消失
     if (apply.apply_user_id) {
-      this.socketGateway.sendToUser(apply.apply_user_id, 'apply:revoked', {
+      this.socketGateway.sendToUser(apply.apply_user_id, Event.APPLY_REVOKED, {
         applyId: id,
-        from: apply.user_id,
+        fromUserId: apply.user_id,
       });
     } else if (apply.room_info) {
-      this.socketGateway.sendToUser(apply.room_info.creator, 'apply:revoked', {
+      this.socketGateway.sendToUser(apply.room_info.creator, Event.APPLY_REVOKED, {
         applyId: id,
-        from: apply.user_id,
+        fromUserId: apply.user_id,
         roomId: apply.room_id,
       });
     }

@@ -7,6 +7,7 @@ import { FriendEntity } from './entities/friend.entity';
 import { UserEntity } from '@/modules/user/entities/user.entity';
 import { HttpException } from '@nestjs/common';
 import { SocketGateway } from '@/socket/socket.gateway';
+import { Event } from '@/socket/events';
 
 @Injectable()
 export class FriendService {
@@ -36,8 +37,9 @@ export class FriendService {
 
     // 对方也要立刻看到这条好友关系
     const creator = await this.userRepository.findOne({ where: { id: createFriendDto.creator } });
-    this.socketGateway.sendToUser(createFriendDto.friend_id, 'friend:added', {
-      user: { id: createFriendDto.creator, username: creator?.username },
+    this.socketGateway.sendToUser(createFriendDto.friend_id, Event.FRIEND_ADDED, {
+      userId: createFriendDto.creator,
+      username: creator?.username,
     });
     // 补发双向在线状态：双方列表刚出现对方，可能此刻就在线
     await this.socketGateway.pushUserStatus(createFriendDto.creator);
@@ -98,7 +100,7 @@ export class FriendService {
     await this.friendRepository.update({ creator: friend_id, friend_id: creator }, { isDeleted: true });
 
     const me = await this.userRepository.findOne({ where: { id: creator } });
-    this.socketGateway.sendToUser(friend_id, 'friend:removed', {
+    this.socketGateway.sendToUser(friend_id, Event.FRIEND_REMOVED, {
       userId: creator,
       username: me?.username,
     });

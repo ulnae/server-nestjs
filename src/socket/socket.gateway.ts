@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
 import { CallSession, CALL_RING_TIMEOUT, RtcSdpMessage, RtcCandidateMessage } from '@/socket/socket.interface'
+import { Event } from '@/socket/events'
 
 @WebSocketGateway({
   path: '/websocket',
@@ -62,42 +63,25 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
-    client.emit('system:message', { message: `Welcome to the WebSocket server!`, timestamp: Date.now() });
   }
-
-  /**   
-   * 接收客户端发送的消息
-   * @param client 
-   * @param message 
-   */
-  @SubscribeMessage('send:message')
-  handleMessage(client: Socket, message: string): void {
-    console.log('Message from client:', message);
-  }
-
 
   /**   
    * 发送信息到指定用户
    * @param client 
    * @param message 
    */
-  @SubscribeMessage('send:user')
-  handleMessageUser(client: Socket, message: { sender: string, message: string }): void {
-    // 需要记录用户id和对应的client映射关系才能实现
-    const receiver = this.users.get(message.sender);
-    const msg = Object.assign({}, message, { 
-      sender: client.data.user.id, // 发送方id
-      receiver: message.sender, // 接收方id
-      timestamp: Date.now() // 消息发送时间
+  @SubscribeMessage(Event.SEND_USER)
+  handleMessageUser(client: Socket, message: { to: string; content: string; clientId?: string; type?: string; size?: number }): void {
+    if (!message?.to) return;
+    const to = message.to;
+    // 收发双方使用同一个事件：收信人靠 from 判断发送者，发送方靠 clientId 对账乐观消息
+    const payload = Object.assign({}, message, {
+      from: client.data.user.id,
+      to,
+      timestamp: Date.now(),
     });
-    if (receiver) {
-      receiver.emit('message:user', msg); // 发送给指定用户
-    } else {
-      this.logger.error(`User ${message.sender} not found`);
-    }
-    client.emit('message:sender', msg); // 回显给发送方
-    // TODO 记录用户之间的消息记录 - 数据库
-    // { message, sender: client.data.user.id, receiver: message.sender, timestamp: Date.now() }
+    this.users.get(to)?.emit(Event.MESSAGE_USER, payload);
+    client.emit(Event.MESSAGE_USER, payload);
   }
 
 
@@ -106,13 +90,16 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * @param client 
    * @param message 
    */
-  @SubscribeMessage('send:room')
-  handleMessageRoom(client: Socket, message: { room: string, message: string }): void {
-    // client.to(message.room).emit('msg2client', message); // 发送给除了自己之外的房间内成员 - 群公告
-    this.wss.to(message.room).emit('message:room', Object.assign({}, message, {
-      sender: client.data.user.id, // 发送方id
-      timestamp: Date.now() // 消息发送时间
-    })); // 发送给房间内所有成员包括自己
+  @SubscribeMessage(Event.SEND_ROOM)
+  handleMessageRoom(client: Socket, message: { roomId: string; content: string; clientId?: string; type?: string; size?: number }): void {
+    if (!message?.roomId) return;
+    const payload = Object.assign({}, message, {
+      roomId: message.roomId,
+      from: client.data.user.id,
+      timestamp: Date.now(),
+    });
+    // 发送给房间内所有成员包括自己
+    this.wss.to(message.roomId).emit(Event.MESSAGE_ROOM, payload);
   }
 
   /**
@@ -120,11 +107,11 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
  * @param client 
  * @param room 
  */
-  @SubscribeMessage('init')
+  @SubscribeMessage(Event.INIT)
   async handleInit(client: Socket): Promise<void> {
     this.logger.log(`init 当前用户信息: id: ${client.data.user.id}, username: ${client.data.user.username}`);
-    // 踢掉其他地方登录的账号
-    this.users.get(client.data.user.id)?.emit('kicked', { 
+    // 踢掉其他地方登录的账号（worker 允许多端，这里保留单端语义，见 realtime-contract.md）
+    this.users.get(client.data.user.id)?.emit(Event.KICKED, { 
       reason: 'Account logged in elsewhere', 
       timestamp: Date.now() 
     });
@@ -159,8 +146,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       // 获取当前房间所有成员
       const sockets = await this.wss.in(room.room_id).fetchSockets();
       // 通知房间内所有成员当前房间活跃用户
-      this.wss.to(room.room_id).emit('online:room', {
-        room: room.room_id,
+      this.wss.to(room.room_id).emit(Event.ONLINE_ROOM, {
+        roomId: room.room_id,
         users: sockets.map(socket => socket.data.user?.id),
         timestamp: Date.now() // 消息发送时间
       }); // 发送给房间内所有成员包括自己
@@ -188,21 +175,16 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       const receiver = this.users.get(friend.friend_id);
       if (receiver) {
         onlineFriends.push(friend.friend_id);
-        const payload = {
-          friend: friend.creator,
+        receiver.emit(Event.STATUS_FRIEND, {
+          userId: friend.creator,
           status,
           timestamp: Date.now()
-        };
-        // status:friend 为规范事件名，status:firend 是历史拼写，过渡期双发
-        receiver.emit('status:friend', payload);
-        receiver.emit('status:firend', payload);
-      } else {
-        this.logger.error(`User ${friend.friend_id} not found`);
+        });
       }
     });
 
     // 如果是上线状态，通知当前用户所有在线好友
-    status && client.emit('online:friends', {
+    status && client.emit(Event.ONLINE_FRIENDS, {
       users: onlineFriends,
       timestamp: Date.now() // 消息发送时间
     });
@@ -265,8 +247,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   async pushRoomOnline(roomId: string): Promise<void> {
     if (!roomId) return;
     const sockets = await this.wss.in(roomId).fetchSockets();
-    this.wss.to(roomId).emit('online:room', {
-      room: roomId,
+    this.wss.to(roomId).emit(Event.ONLINE_ROOM, {
+      roomId,
       users: sockets.map(socket => socket.data.user?.id),
       timestamp: Date.now(),
     });
@@ -283,23 +265,19 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       where: { creator: userId, isDeleted: false },
     });
     for (const friend of friends) {
-      // 告诉好友我的当前状态（status:friend 为规范事件名，过渡期双发旧拼写）
-      const mine = {
-        friend: userId,
+      // 告诉好友我的当前状态
+      this.users.get(friend.friend_id)?.emit(Event.STATUS_FRIEND, {
+        userId,
         status: online,
         timestamp: Date.now(),
-      };
-      this.users.get(friend.friend_id)?.emit('status:friend', mine);
-      this.users.get(friend.friend_id)?.emit('status:firend', mine);
+      });
       // 告诉我哪些好友当前在线
       if (online && this.users.has(friend.friend_id)) {
-        const theirs = {
-          friend: friend.friend_id,
+        this.users.get(userId)?.emit(Event.STATUS_FRIEND, {
+          userId: friend.friend_id,
           status: true,
           timestamp: Date.now(),
-        };
-        this.users.get(userId)?.emit('status:friend', theirs);
-        this.users.get(userId)?.emit('status:firend', theirs);
+        });
       }
     }
   }
@@ -350,7 +328,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
         });
       } else {
         // 通话阶段断线：通知对方通话结束
-        peer.emit('call:ended', {
+        peer.emit(Event.CALL_ENDED, {
           callId,
           reason: 'offline',
           timestamp: Date.now(),
@@ -363,32 +341,32 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   /**
    * 主叫发起通话邀请（拨打）
    */
-  @SubscribeMessage('call:invite')
+  @SubscribeMessage(Event.CALL_INVITE)
   handleCallInvite(client: Socket, payload: { to: string }): void {
     const callerId = client.data.user.id;
     const calleeId = payload?.to;
 
     if (!calleeId || calleeId === callerId) {
-      client.emit('call:error', { to: calleeId, reason: 'invalid', timestamp: Date.now() });
+      client.emit(Event.CALL_ERROR, { to: calleeId, reason: 'invalid', timestamp: Date.now() });
       return;
     }
 
     // 主叫自己已在通话中
     if (this.userCallMap.has(callerId)) {
-      client.emit('call:error', { to: calleeId, reason: 'busy-self', timestamp: Date.now() });
+      client.emit(Event.CALL_ERROR, { to: calleeId, reason: 'busy-self', timestamp: Date.now() });
       return;
     }
 
     const callee = this.users.get(calleeId);
     // 被叫不在线
     if (!callee) {
-      client.emit('call:error', { to: calleeId, reason: 'offline', timestamp: Date.now() });
+      client.emit(Event.CALL_ERROR, { to: calleeId, reason: 'offline', timestamp: Date.now() });
       return;
     }
 
     // 被叫忙线中
     if (this.userCallMap.has(calleeId)) {
-      client.emit('call:error', { to: calleeId, reason: 'busy', timestamp: Date.now() });
+      client.emit(Event.CALL_ERROR, { to: calleeId, reason: 'busy', timestamp: Date.now() });
       return;
     }
 
@@ -405,8 +383,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     session.ringTimeout = setTimeout(() => {
       const current = this.calls.get(callId);
       if (!current || current.status !== 'ringing') return;
-      this.users.get(current.caller)?.emit('call:timeout', { callId, timestamp: Date.now() });
-      this.users.get(current.callee)?.emit('call:canceled', { callId, reason: 'timeout', timestamp: Date.now() });
+      this.users.get(current.caller)?.emit(Event.CALL_TIMEOUT, { callId, timestamp: Date.now() });
+      this.users.get(current.callee)?.emit(Event.CALL_CANCELED, { callId, reason: 'timeout', timestamp: Date.now() });
       this.releaseCall(current);
       this.logger.log(`Call ${callId} timeout`);
     }, CALL_RING_TIMEOUT);
@@ -416,25 +394,25 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     this.userCallMap.set(calleeId, callId);
 
     // 通知被叫有来电
-    callee.emit('call:incoming', {
+    callee.emit(Event.CALL_INCOMING, {
       callId,
       from: callerId,
       username: client.data.user.username,
       timestamp: Date.now(),
     });
     // 通知主叫正在振铃
-    client.emit('call:ringing', { callId, to: calleeId, timestamp: Date.now() });
+    client.emit(Event.CALL_RINGING, { callId, to: calleeId, timestamp: Date.now() });
     this.logger.log(`Call ${callId} invite: ${callerId} -> ${calleeId}`);
   }
 
   /**
    * 被叫接听通话
    */
-  @SubscribeMessage('call:accept')
+  @SubscribeMessage(Event.CALL_ACCEPT)
   handleCallAccept(client: Socket, payload: { callId: string }): void {
     const session = this.calls.get(payload?.callId);
     if (!session || session.callee !== client.data.user.id || session.status !== 'ringing') {
-      client.emit('call:error', { callId: payload?.callId, reason: 'unavailable', timestamp: Date.now() });
+      client.emit(Event.CALL_ERROR, { callId: payload?.callId, reason: 'unavailable', timestamp: Date.now() });
       return;
     }
 
@@ -442,7 +420,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     // 主叫已离开
     if (!caller) {
       this.releaseCall(session);
-      client.emit('call:ended', { callId: session.id, reason: 'offline', timestamp: Date.now() });
+      client.emit(Event.CALL_ENDED, { callId: session.id, reason: 'offline', timestamp: Date.now() });
       return;
     }
 
@@ -451,19 +429,19 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       session.ringTimeout = null;
     }
     session.status = 'active';
-    caller.emit('call:accepted', { callId: session.id, from: session.callee, timestamp: Date.now() });
+    caller.emit(Event.CALL_ACCEPTED, { callId: session.id, from: session.callee, timestamp: Date.now() });
     this.logger.log(`Call ${session.id} accepted by ${session.callee}`);
   }
 
   /**
    * 被叫拒绝通话
    */
-  @SubscribeMessage('call:reject')
+  @SubscribeMessage(Event.CALL_REJECT)
   handleCallReject(client: Socket, payload: { callId: string }): void {
     const session = this.calls.get(payload?.callId);
     if (!session || session.callee !== client.data.user.id) return;
 
-    this.users.get(session.caller)?.emit('call:rejected', {
+    this.users.get(session.caller)?.emit(Event.CALL_REJECTED, {
       callId: session.id,
       timestamp: Date.now(),
     });
@@ -474,12 +452,12 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   /**
    * 主叫取消通话（振铃阶段挂断）
    */
-  @SubscribeMessage('call:cancel')
+  @SubscribeMessage(Event.CALL_CANCEL)
   handleCallCancel(client: Socket, payload: { callId: string }): void {
     const session = this.calls.get(payload?.callId);
     if (!session || session.caller !== client.data.user.id) return;
 
-    this.users.get(session.callee)?.emit('call:canceled', {
+    this.users.get(session.callee)?.emit(Event.CALL_CANCELED, {
       callId: session.id,
       timestamp: Date.now(),
     });
@@ -490,7 +468,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   /**
    * 任意一方结束通话（挂断）
    */
-  @SubscribeMessage('call:end')
+  @SubscribeMessage(Event.CALL_END)
   handleCallEnd(client: Socket, payload: { callId: string }): void {
     const session = this.calls.get(payload?.callId);
     if (!session) return;
@@ -499,7 +477,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     if (session.caller !== userId && session.callee !== userId) return;
 
     const peerId = session.caller === userId ? session.callee : session.caller;
-    this.users.get(peerId)?.emit('call:ended', {
+    this.users.get(peerId)?.emit(Event.CALL_ENDED, {
       callId: session.id,
       reason: 'hangup',
       timestamp: Date.now(),
@@ -511,11 +489,11 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   /**
    * 转发 WebRTC Offer
    */
-  @SubscribeMessage('webrtc:offer')
+  @SubscribeMessage(Event.WEBRTC_OFFER)
   handleWebRtcOffer(client: Socket, payload: { callId: string; sdp: RtcSdpMessage }): void {
     const peer = this.getCallPeer(client, payload?.callId);
     if (!peer) return;
-    peer.socket.emit('webrtc:offer', {
+    peer.socket.emit(Event.WEBRTC_OFFER, {
       callId: peer.session.id,
       from: client.data.user.id,
       sdp: payload.sdp,
@@ -525,11 +503,11 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   /**
    * 转发 WebRTC Answer
    */
-  @SubscribeMessage('webrtc:answer')
+  @SubscribeMessage(Event.WEBRTC_ANSWER)
   handleWebRtcAnswer(client: Socket, payload: { callId: string; sdp: RtcSdpMessage }): void {
     const peer = this.getCallPeer(client, payload?.callId);
     if (!peer) return;
-    peer.socket.emit('webrtc:answer', {
+    peer.socket.emit(Event.WEBRTC_ANSWER, {
       callId: peer.session.id,
       from: client.data.user.id,
       sdp: payload.sdp,
@@ -539,11 +517,11 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   /**
    * 转发 WebRTC ICE Candidate
    */
-  @SubscribeMessage('webrtc:candidate')
+  @SubscribeMessage(Event.WEBRTC_CANDIDATE)
   handleWebRtcCandidate(client: Socket, payload: { callId: string; candidate: RtcCandidateMessage }): void {
     const peer = this.getCallPeer(client, payload?.callId);
     if (!peer) return;
-    peer.socket.emit('webrtc:candidate', {
+    peer.socket.emit(Event.WEBRTC_CANDIDATE, {
       callId: peer.session.id,
       from: client.data.user.id,
       candidate: payload.candidate,

@@ -37,14 +37,6 @@ export class RoomController {
   }
 
   @ApiOperation({
-    summary: '查询我创建的房间列表',
-  })
-  @Get('/mine')
-  findMineAll(@Query('page') page: number = 1, @Query('pageSize') pageSize: number = 10, @Req() request) {
-    return this.roomService.findMineAll(page, pageSize, request.user);
-  }
-
-  @ApiOperation({
     summary: '登录聚合拉取：我加入的房间 + 每房成员 + 每房在线名单',
   })
   @Get('/overview')
