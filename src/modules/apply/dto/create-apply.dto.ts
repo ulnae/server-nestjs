@@ -1,21 +1,27 @@
 
-import { IsNotEmpty } from 'class-validator';
+import { IsOptional, IsString } from 'class-validator';
 
 export class CreateApplyDto {
 
     /**
-     * 用户id
+     * 申请人 id
+     * 兼容旧字段：服务端一律以 token 为准，这里不再强制要求
      */
-    @IsNotEmpty({ message: '用户id不能为空' })
-    user_id: string;
+    @IsOptional()
+    @IsString()
+    user_id?: string;
 
     /**
      * 房间id
      */
+    @IsOptional()
+    @IsString()
     room_id?: string;
 
     /**
      * 被申请用户id
      */
+    @IsOptional()
+    @IsString()
     apply_user_id?: string;
 }

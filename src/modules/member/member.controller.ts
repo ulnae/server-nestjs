@@ -24,8 +24,8 @@ export class MemberController {
     summary: '查询全部成员',
   })
   @Get()
-  findAll(@Req() req: Request & { query: SearchMemberDto }) {
-    return this.memberService.findAll(req.query);
+  findAll(@Req() req: Request & { query: SearchMemberDto; user: any }) {
+    return this.memberService.findAll(req.query, req.user?.id);
   }
 
 

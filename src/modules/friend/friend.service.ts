@@ -19,30 +19,36 @@ export class FriendService {
   @InjectRepository(UserEntity)
   private userRepository: Repository<UserEntity>;
 
-  async create(createFriendDto: CreateFriendDto) {
+  async create(createFriendDto: CreateFriendDto, operatorId: string) {
+    // creator 只能取当前登录用户：以前直接用 body 里的值，等于允许任何人伪造「别人加了你」
+    const creator = operatorId;
+    const friendId = createFriendDto.friend_id;
+    if (!friendId) throw new HttpException('缺少 friend_id', 400);
+    if (friendId === creator) throw new HttpException('不能添加自己为好友', 400);
+
+    const target = await this.userRepository.findOne({ where: { id: friendId, isDeleted: false } });
+    if (!target) throw new HttpException('该用户不存在', 404);
+
     // 检查好友是否存在
     const friend = await this.friendRepository.findOne({
-      where: {
-        isDeleted: false,
-        ...createFriendDto,
-      },
+      where: { isDeleted: false, creator, friend_id: friendId },
     });
 
     if (friend) {
-      throw new HttpException('好友关系已存在',401);
+      throw new HttpException('好友关系已存在', 409);
     }
 
     // 创建好友关系
-    const saved = await this.friendRepository.save(createFriendDto);
+    const saved = await this.friendRepository.save({ creator, friend_id: friendId });
 
     // 对方也要立刻看到这条好友关系
-    const creator = await this.userRepository.findOne({ where: { id: createFriendDto.creator } });
-    this.socketGateway.sendToUser(createFriendDto.friend_id, Event.FRIEND_ADDED, {
-      userId: createFriendDto.creator,
-      username: creator?.username,
+    const me = await this.userRepository.findOne({ where: { id: creator } });
+    this.socketGateway.sendToUser(friendId, Event.FRIEND_ADDED, {
+      userId: creator,
+      username: me?.username,
     });
     // 补发双向在线状态：双方列表刚出现对方，可能此刻就在线
-    await this.socketGateway.pushUserStatus(createFriendDto.creator);
+    await this.socketGateway.pushUserStatus(creator);
     return saved;
   }
 
@@ -91,7 +97,7 @@ export class FriendService {
         where: { creator: friend_id, friend_id: creator, isDeleted: false },
       });
       if (!reverse) {
-        throw new HttpException('好友关系不存在', 401);
+        throw new HttpException('好友关系不存在', 404);
       }
     }
 

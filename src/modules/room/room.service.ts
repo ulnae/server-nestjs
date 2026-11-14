@@ -4,6 +4,7 @@ import { UpdateRoomDto } from '@/modules/room/dto/update-room.dto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Like, Repository } from 'typeorm';
 import { RoomEntity } from '@/modules/room/entities/room.entity';
+import { UserEntity } from '@/modules/user/entities/user.entity';
 import { UserInfo } from '@/modules/user/user.interface';
 import { RoomRo } from '@/modules/room/room.interface';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
@@ -18,10 +19,19 @@ export class RoomService {
   private readonly roomRepository: Repository<RoomEntity>;
   @InjectRepository(MemberEntity)
   private readonly memberRepository: Repository<MemberEntity>;
+  @InjectRepository(UserEntity)
+  private readonly userRepository: Repository<UserEntity>;
 
   async create(createRoomDto: CreateRoomDto, user: UserInfo): Promise<string> {
-    const room = await this.roomRepository.save(Object.assign(createRoomDto, {
+    // 表上 name 是唯一索引（含已软删的行）：不先查一次，同名房间会直接抛 SQL 错误变成 500
+    const duplicated = await this.roomRepository.findOne({ where: { name: createRoomDto.name } });
+    if (duplicated) {
+      throw new HttpException('房间名称已被使用（含已解散的房间），换一个名字吧', 400);
+    }
+    const room = await this.roomRepository.save(Object.assign({}, createRoomDto, {
       creator: user.id,
+      // description 在实体上是 NOT NULL，缺省时补空串
+      description: createRoomDto.description ?? '',
     }));
     await this.memberRepository.save({
       room_id: room.id,
@@ -137,9 +147,9 @@ export class RoomService {
             : null,
         });
       }
-      for (const roomId of roomIds) {
-        online[roomId] = await this.socketGateway.roomOnline(roomId);
-      }
+      // 之前是 for + await：20 个房间就是 20 次跨节点 fetchSockets，改成一次批量查询
+      const onlineMap = await this.socketGateway.roomOnlineMany(roomIds);
+      for (const roomId of roomIds) online[roomId] = onlineMap[roomId] || [];
     }
 
     return { rooms, members, online };
@@ -169,7 +179,7 @@ export class RoomService {
       relations: ['user_info']
     });
     if (!room) {
-      throw new HttpException(`id为${id}的房间不存在`, 401);
+      throw new HttpException(`id为${id}的房间不存在`, 404);
     }
     return room;
   }
@@ -179,15 +189,31 @@ export class RoomService {
       where: { 
         id, 
         isDeleted: false, 
-        // user_info: { isDeleted: false } 
       } 
     });
     if (!room) {
-      throw new HttpException(`id为${id}的房间不存在`, 401);
+      throw new HttpException(`id为${id}的房间不存在`, 404);
+    }
+    // 契约里写的是「群主」：缺这行判断等于任何登录用户都能改别人群的名称与公告
+    if (!operatorId || room.creator !== operatorId) {
+      throw new HttpException('只有群主可以修改房间信息', 403);
     }
     const updateRoomDtoCopy = { ...updateRoomDto };
-    updateRoomDto.name && (updateRoomDtoCopy.name = updateRoomDto.name);
-    updateRoomDto.description && (updateRoomDtoCopy.description = updateRoomDto.description);
+    // 用 !== undefined 而不是真值判断：否则把群公告清空（传空串）会被静默忽略
+    if (updateRoomDtoCopy.name !== undefined) {
+      const name = String(updateRoomDtoCopy.name).trim();
+      if (!name) throw new HttpException('房间名称不能为空', 400);
+      if (name !== room.name) {
+        const duplicated = await this.roomRepository.findOne({ where: { name } });
+        if (duplicated && duplicated.id !== id) {
+          throw new HttpException('房间名称已被使用，换一个名字吧', 400);
+        }
+      }
+      updateRoomDtoCopy.name = name;
+    }
+    if (updateRoomDtoCopy.description !== undefined) {
+      updateRoomDtoCopy.description = String(updateRoomDtoCopy.description);
+    }
     const updatePost = this.roomRepository.merge(room, updateRoomDtoCopy);
     await this.roomRepository.save(updatePost);
 
@@ -208,25 +234,31 @@ export class RoomService {
       } 
     });
     if (!room) {
-      throw new HttpException(`id为${id}的房间不存在`, 401);
+      throw new HttpException(`id为${id}的房间不存在`, 404);
     }
-    if (operatorId && room.creator !== operatorId) {
-      throw new HttpException('只有群主可以解散房间', 401);
+    if (!operatorId || room.creator !== operatorId) {
+      throw new HttpException('只有群主可以解散房间', 403);
     }
 
     const roomName = room.name;
+    const operator = await this.userRepository.findOne({ where: { id: operatorId } });
+    const members = await this.memberRepository.find({ where: { room_id: room.id, isDeleted: false } });
     room.isDeleted = true;
+    // name 有唯一索引：软删后不释放名字，同名房间永远建不回来
+    room.name = `${roomName} #deleted:${room.id}`.slice(0, 100);
     await this.roomRepository.save(room);
     // 标记所有房间成员为已删除
     await this.memberRepository.update({ room_id: room.id }, { isDeleted: true });
 
     // 解散房间：所有在线成员立刻收到通知，并把房间从订阅里摘掉
-    if (operatorId) {
-      this.socketGateway.sendToRoom(room.id, Event.ROOM_DELETED, {
-        roomId: room.id,
-        roomName,
-        byUserId: operatorId,
-      });
+    this.socketGateway.sendToRoom(room.id, Event.ROOM_DELETED, {
+      roomId: room.id,
+      roomName,
+      byUserId: operatorId,
+      byUsername: operator?.username,
+    });
+    for (const member of members || []) {
+      await this.socketGateway.syncUserRooms(member.user_id);
     }
     return '删除房间成功'
   }

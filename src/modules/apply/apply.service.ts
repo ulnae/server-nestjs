@@ -34,7 +34,7 @@ export class ApplyService {
       where: Object.assign(createApplyDto, { user_id, isDeleted: false, handle_status: false }),
     })
     if (apply) {
-      throw new HttpException('已存在相同申请', 401);
+      throw new HttpException('已存在相同申请', 409);
     }
     const saved = await this.applyRepository.save(Object.assign(createApplyDto, { user_id }));
 
@@ -164,14 +164,14 @@ export class ApplyService {
       relations: ['user_info', 'room_info', 'apply_user_info'],
     });
     if (!apply) {
-      throw new HttpException('申请不存在', 401);
+      throw new HttpException('申请不存在', 404);
     }
     if (apply.handle_status) {
-      throw new HttpException('已处理，不能再操作', 401);
+      throw new HttpException('已处理，不能再操作', 409);
     }
 
     if (apply.apply_user_id && apply.apply_user_id !== userId) {
-      throw new HttpException('不是被申请人，不能操作', 401);
+      throw new HttpException('不是被申请人，不能操作', 403);
     }
     if (apply.apply_user_id) {
       // todo 申请好友时，判断是否是好友
@@ -191,7 +191,7 @@ export class ApplyService {
     }
 
     if (apply.room_id && apply.room_info?.creator !== userId) {
-      throw new HttpException('不是房间创建人，不能操作', 401);
+      throw new HttpException('不是房间创建人，不能操作', 403);
     }
     if (apply.room_id) {
       // todo 申请加入房间时，判断是否是房间成员
@@ -204,7 +204,11 @@ export class ApplyService {
       }
     }
 
-    const result = await this.applyRepository.update(id, updateApplyDto);
+    // 只取这两个字段：DTO 没有 whitelist，直接透传会把 user_id / room_id 一起写进去
+    const result = await this.applyRepository.update(id, {
+      status: !!updateApplyDto.status,
+      handle_status: true,
+    });
 
     // 实时通知申请人处理结果（事件名与 worker 侧一致）
     if (apply.apply_user_id) {
@@ -254,10 +258,10 @@ export class ApplyService {
       relations: ['room_info'],
     });
     if (!apply) {
-      throw new HttpException('申请不存在', 401);
+      throw new HttpException('申请不存在', 404);
     }
     if (apply.handle_status) {
-      throw new HttpException('已处理，不能再操作', 401);
+      throw new HttpException('已处理，不能再操作', 409);
     }
     const saved = await this.applyRepository.save(Object.assign(apply, { isDeleted: true }));
 

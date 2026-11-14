@@ -1,6 +1,6 @@
 import { PartialType } from '@nestjs/swagger';
 import { CreateApplyDto } from './create-apply.dto';
-import { IsNotEmpty } from 'class-validator';
+import { IsNotEmpty, IsOptional } from 'class-validator';
 
 export class UpdateApplyDto extends PartialType(CreateApplyDto) {
      /**
@@ -10,8 +10,8 @@ export class UpdateApplyDto extends PartialType(CreateApplyDto) {
     status: boolean;
 
     /**
-     * 处理状态
-     */
-    @IsNotEmpty({ message: '处理状态不能为空' })
-    handle_status: boolean;
+     * 处理状态（服务端会自己置为 true，客户端不必传）
+      */
+    @IsOptional()
+    handle_status?: boolean;
 }

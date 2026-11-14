@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { LoggerService } from '@/logger/logger.service';
 import session from 'express-session';
+import { ValidationPipe } from '@nestjs/common';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -21,6 +22,14 @@ async function bootstrap() {
   app.useGlobalFilters(new HttpExceptionFilter(loggerService));
   // 全局注册拦截器
   app.useGlobalInterceptors(new TransformInterceptor(loggerService))
+
+  /* 全局参数校验：whitelist 会剔除 DTO 未声明的字段。
+     之前任何 PATCH 都能把 body 里的 user_id / room_id 一起写进实体（mass assignment），
+     现在只有 DTO 声明过的字段能进入业务层。 */
+  app.useGlobalPipes(new ValidationPipe({
+    whitelist: true,
+    transform: true,
+  }));
 
   // 设置swagger文档
   const swaggerOptions = new DocumentBuilder()
@@ -52,16 +61,17 @@ async function bootstrap() {
 
 
 
-  // 启用 CORS（允许所有域）
+  /* CORS：只放行 ALLOW_ORIGIN 里列出的来源（逗号分隔）。
+     之前是 origin 回调无条件回声任意 Origin，且 credentials: true，
+     等于任何站点都能带着 session cookie 读接口返回。 */
+  const allowOrigins = String(config.get('ALLOW_ORIGIN') || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
   app.enableCors({
-    // origin: ['http://localhost', 'http://192.168.58.190'], // 允许的来源（credentials: true 时不能使用通配符）
-    // origin: ['http://localhost', 'http://62.234.18.27'], // 允许的来源（credentials: true 时不能使用通配符）
-    origin:(origin, callback) => {
-      // 在此处加入你的判断逻辑
-      callback(null, origin);
-    },
+    origin: allowOrigins.length ? allowOrigins : false,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // 允许的 HTTP 方法
-    allowedHeaders: ['Content-Type', 'Authorization'], // 允许的请求头
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-alert-secret'], // 允许的请求头
     credentials: true, // 是否允许携带凭证（如 Cookie）
     maxAge: 3600, // 预检请求的有效期（单位：秒）
   });

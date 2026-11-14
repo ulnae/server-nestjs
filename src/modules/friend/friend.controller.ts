@@ -16,8 +16,8 @@ export class FriendController {
     summary: '创建记录',
   })
   @Post()
-  create(@Body() createFriendDto: CreateFriendDto) {
-    return this.friendService.create(createFriendDto);
+  create(@Body() createFriendDto: CreateFriendDto, @Req() req) {
+    return this.friendService.create(createFriendDto, req.user.id);
   }
 
   @ApiOperation({

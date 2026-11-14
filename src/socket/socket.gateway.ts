@@ -1,6 +1,6 @@
 import { OnGatewayInit, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import type { OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
-import { Logger, UseGuards } from '@nestjs/common';
+import { Logger, UseFilters, UseGuards } from '@nestjs/common';
 import { Socket, Server } from 'socket.io';
 import { randomUUID } from 'crypto';
 import { WsJwtAuthGuard } from '@/socket/socket.guard'
@@ -10,6 +10,7 @@ import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
 import { CallSession, CALL_RING_TIMEOUT, RtcSdpMessage, RtcCandidateMessage } from '@/socket/socket.interface'
 import { Event } from '@/socket/events'
+import { WsExceptionFilter } from '@/socket/ws-exception.filter'
 
 @WebSocketGateway({
   path: '/websocket',
@@ -21,6 +22,7 @@ import { Event } from '@/socket/events'
 }) // 指定端口号8030
 // @WebSocketGateway() // 默认使用服务所用端口-3000
 @UseGuards(WsJwtAuthGuard) // 对整个网关的连接应用认证守卫
+@UseFilters(new WsExceptionFilter()) // 处理器抛错时回一条 exception，形状与 worker 一致
 export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() wss: Server;
 
@@ -93,6 +95,9 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   @SubscribeMessage(Event.SEND_ROOM)
   handleMessageRoom(client: Socket, message: { roomId: string; content: string; clientId?: string; type?: string; size?: number }): void {
     if (!message?.roomId) return;
+    // 服务端必须自己校验成员资格：客户端直接 emit 一个没加入的 roomId，
+    // socket.io 照样会把消息投递给该房间，等于任何人可以往任意群里灌消息
+    if (!client.rooms.has(message.roomId)) return;
     const payload = Object.assign({}, message, {
       roomId: message.roomId,
       from: client.data.user.id,
@@ -139,22 +144,29 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       },
       relations: ['room_info'],
     });
-    rooms.forEach(async room => {
-      // 加入房间/离开房间
-      client[type](room.room_id);
+    const roomIds = (rooms || []).map(room => room.room_id).filter(Boolean);
+    for (const roomId of roomIds) client[type](roomId);
+    if (!roomIds.length) return;
 
-      // 获取当前房间所有成员
-      const sockets = await this.wss.in(room.room_id).fetchSockets();
-      // 通知房间内所有成员当前房间活跃用户
-      this.wss.to(room.room_id).emit(Event.ONLINE_ROOM, {
-        roomId: room.room_id,
-        users: sockets.map(socket => socket.data.user?.id),
-        timestamp: Date.now() // 消息发送时间
-      }); // 发送给房间内所有成员包括自己
-
-      // 
-      // client.emit(type, { room: room.room_id, message: `You have ${type} room: ${room.room_info.name}` });
-    });
+    /* 一次拉全：之前是 forEach + 每房间一次 fetchSockets（跨节点 RPC），
+       房间多时初始化会明显变慢；另外 forEach 的 async 回调是浮空 Promise，异常无人接管 */
+    const sockets = await this.wss.in(roomIds).fetchSockets();
+    const onlineByRoom = new Map<string, string[]>();
+    for (const socket of sockets) {
+      for (const roomId of socket.rooms) {
+        if (!roomIds.includes(roomId)) continue;
+        const list = onlineByRoom.get(roomId) || [];
+        if (socket.data.user?.id) list.push(socket.data.user.id);
+        onlineByRoom.set(roomId, list);
+      }
+    }
+    for (const roomId of roomIds) {
+      this.wss.to(roomId).emit(Event.ONLINE_ROOM, {
+        roomId,
+        users: onlineByRoom.get(roomId) || [],
+        timestamp: Date.now(),
+      });
+    }
   }
 
   /**
@@ -238,6 +250,22 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     if (!roomId) return [];
     const sockets = await this.wss.in(roomId).fetchSockets();
     return sockets.map(socket => socket.data.user?.id).filter(Boolean);
+  }
+
+  /** 批量版本：一次 fetchSockets 拿回多个房间的在线名单（overview 用） */
+  async roomOnlineMany(roomIds: string[]): Promise<Record<string, string[]>> {
+    const result: Record<string, string[]> = {};
+    const ids = (roomIds || []).filter(Boolean);
+    for (const id of ids) result[id] = [];
+    if (!ids.length) return result;
+    const sockets = await this.wss.in(ids).fetchSockets();
+    for (const socket of sockets) {
+      for (const roomId of socket.rooms) {
+        if (!result[roomId]) continue;
+        if (socket.data.user?.id) result[roomId].push(socket.data.user.id);
+      }
+    }
+    return result;
   }
 
   /**

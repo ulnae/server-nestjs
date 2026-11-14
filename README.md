@@ -1,6 +1,6 @@
 # server-nestjs
 
-基于 NestJS 框架开发的后端服务项目，提供完整的 Web 服务功能，包括 RESTful API、WebSocket 实时通信、SSE 服务器推送、用户认证授权等。
+基于 NestJS 框架开发的后端服务项目，提供完整的 Web 服务功能，包括 RESTful API、WebSocket 实时通信、用户认证授权等。
 
 ## 技术栈
 
@@ -11,7 +11,7 @@
 - **API 文档**: Swagger ^11.2.1
 - **认证授权**: JWT (JSON Web Token) ^11.0.1 + Passport ^0.7.0
 - **实时通信**: Socket.IO ^4.8.1
-- **服务器推送**: SSE (Server-Sent Events)
+- **实时推送**: WebSocket（Socket.IO，路径 `/websocket`）
 - **定时任务**: @nestjs/schedule ^6.1.0
 - **日志管理**: Winston ^3.18.3 + nest-winston ^1.10.2
 - **验证**: class-validator ^0.14.2
@@ -38,7 +38,6 @@ src/
 │   ├── friend/         # 好友模块
 │   ├── member/         # 成员模块
 │   ├── room/           # 房间模块
-│   ├── sse/            # SSE实时推送模块
 │   └── user/           # 用户模块
 ├── socket/             # WebSocket 网关
 ├── app.module.ts       # 根模块
@@ -56,7 +55,7 @@ src/
 - JWT 令牌认证
 - Passport 策略集成
 - WebSocket 连接认证
-- 支持 query 参数传递 JWT（用于 SSE）
+- 系统广播接口需要 `x-alert-secret` 头（见「系统广播」一节）
 
 ### 3. 房间与成员管理
 - 创建和管理聊天房间
@@ -71,27 +70,22 @@ src/
 ### 5. WebSocket 实时通信
 - **服务端口**: 与主服务相同（默认 3000）
 - **连接路径**: `/websocket`
-- **支持跨域**: 允许所有来源
+- **跨域**: 只放行 `ALLOW_ORIGIN` 里列出的来源
 - **认证方式**: JWT 令牌（通过 `auth.token` 传递）
-- **消息类型**:
-  - `message` - 普通消息
-  - `user` - 单对单消息
-  - `room` - 房间群聊消息
-  - `init` - 初始化用户连接
-  - `online` - 房间成员在线列表
-  - `onlineFriends` - 在线好友列表
-  - `status` - 好友状态变更通知
-  - `sender` - 消息发送回执
-  - `alert` - 系统警报消息
+- **事件名**: 与前端 / worker 完全一致，集中定义在 `src/socket/events.ts`，
+  唯一事实来源是 `Discuss/docs/realtime-contract.md`。常用几组：
+  - `init` / `send:user` / `send:room` —— 客户端上行
+  - `message:user` / `message:room` —— 消息下发（收发双方同一事件，靠 `from` 区分）
+  - `online:room` / `online:friends` / `status:friend` —— 在线状态
+  - `friend:*` / `room:*` / `member:*` / `apply:revoked` —— 关系变更
+  - `system:alert` / `exception` —— 系统广播与失败回执
+  - `call:*` / `webrtc:*` —— 语音通话信令
 
-### 6. SSE 服务器推送
-- **接口地址**: `GET /sse?token={jwt_token}`
-- **功能特性**:
-  - 向指定用户推送消息
-  - 向所有用户广播消息
-  - 自动连接断开清理
-  - JWT 认证支持（从 query 参数获取 token）
-- **使用场景**: 系统通知、实时数据推送等
+### 6. 系统广播（需鉴权）
+- **接口**: `POST /alert`，请求头带 `x-alert-secret: <ALERT_SECRET>`
+- **语义**: 向所有在线连接广播一条 `system:alert`
+- **注意**: 未配置 `ALERT_SECRET` 时接口直接关闭（403），不会退化成匿名广播；
+  之前这个接口没有任何守卫，任何人请求一次就能让全站弹窗
 
 ### 7. 定时任务
 - 每日凌晨自动清空 `public` 目录下的所有文件夹
@@ -283,58 +277,19 @@ socket.emit('room', {
 });
 ```
 
-## SSE 使用示例
-
-### 前端使用示例
+## 实时事件示例
 
 ```javascript
-// 建立 SSE 连接
-const token = 'your-jwt-token';
-const eventSource = new EventSource(`/sse?token=${token}`);
+// 连接（JWT 通过 auth.token 传递）
+const socket = io('http://localhost:3000', { path: '/websocket', transports: ['websocket'], auth: { token } });
 
-// 监听消息
-eventSource.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log('收到消息:', data);
-};
-
-// 监听错误
-eventSource.onerror = (error) => {
-  console.error('SSE连接错误:', error);
-};
-
-// 关闭连接
-eventSource.close();
+socket.on('connect', () => socket.emit('init'));
+socket.emit('send:room', { roomId, content: 'hello', clientId: 'c-1' });
+socket.on('message:room', (data) => console.log(data.from, data.content));
+socket.on('exception', (data) => console.warn('处理失败：', data.message));
 ```
 
-### 后端推送消息
-
-```typescript
-import { SseService } from '@/modules/sse/sse.service';
-
-@Injectable()
-export class YourService {
-  constructor(private readonly sseService: SseService) {}
-
-  // 向指定用户推送消息
-  async notifyUser(userId: string) {
-    this.sseService.sendDataToUser(userId, {
-      type: 'notification',
-      message: '您有新的消息',
-      timestamp: new Date()
-    });
-  }
-
-  // 向所有用户广播消息
-  async broadcastMessage() {
-    this.sseService.broadcast({
-      type: 'system',
-      message: '系统通知',
-      timestamp: new Date()
-    });
-  }
-}
-```
+完整事件表与 payload 见 `Discuss/docs/realtime-contract.md`。
 
 ## 数据库实体
 
@@ -370,8 +325,7 @@ pnpm run commit
 - **Swagger 文档**: http://localhost:3000/docs
 - **WebSocket 服务**: ws://localhost:3000/websocket
 - **静态资源**: http://localhost:3000/public
-- **SSE 服务**: http://localhost:3000/sse
-- **系统警报 API**: POST http://localhost:3000/alert
+- **系统广播 API**: POST http://localhost:3000/alert（需 `x-alert-secret`）
 
 ## 注意事项
 
@@ -386,10 +340,10 @@ pnpm run commit
    - 在 `auth.token` 字段中传递 token
    - 使用 `WsJwtAuthGuard` 守卫保护整个网关
 
-3. **SSE 认证**：
-   - SSE 连接需要在 query 参数中传递 JWT token
-   - 格式：`/sse?token={jwt_token}`
-   - 使用 `JwtQueryGuard` 进行认证
+3. **系统广播认证**：
+   - `POST /alert` 必须带 `x-alert-secret` 头，值与环境变量 `ALERT_SECRET` 一致
+   - 未配置 `ALERT_SECRET` 时该接口返回 403（默认关闭）
+   - 历史版本曾通过 query 传递 JWT 的 SSE 通道，已整体移除
 
 4. **定时任务**：
    - 定时任务默认每天凌晨执行（00:00）

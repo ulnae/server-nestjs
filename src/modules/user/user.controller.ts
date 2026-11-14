@@ -86,8 +86,8 @@ export class UserController {
   })
   @Delete(':id')
   @UseGuards(JwtAuthGuard) // 仅该接口需要鉴权
-  remove(@Param('id') id: string) {
-    return this.userService.remove(id);
+  remove(@Param('id') id: string, @Req() request) {
+    return this.userService.remove(id, request.user?.id);
   }
 
   @ApiOperation({

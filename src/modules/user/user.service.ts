@@ -101,10 +101,14 @@ export class UserService {
     return '更新用户成功'
   }
 
-  async remove(id: string) {
+  async remove(id: string, operatorId?: string) {
     const existUser = await this.userRepository.findOne({ where: { id, isDeleted: false } });
     if (!existUser) {
-      throw new HttpException(`id为${id}的用户不存在`, 401);
+      throw new HttpException(`id为${id}的用户不存在`, 404);
+    }
+    // 只能注销自己：否则任何登录用户都能把别人的账号软删掉
+    if (!operatorId || operatorId !== id) {
+      throw new HttpException('您没有权限删除该用户', 403);
     }
     existUser.isDeleted = true;
     await this.userRepository.save(existUser);
