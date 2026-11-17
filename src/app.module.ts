@@ -19,6 +19,7 @@ import { ApplyEntity } from '@/modules/apply/entities/apply.entity';
 import { FriendModule } from '@/modules/friend/friend.module';
 import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { CronModule } from '@/modules/cron/cron.module';
+import { RtcModule } from '@/modules/rtc/rtc.module';
 import { SocketModule } from '@/socket/socket.module';
 import envConfig from '../config/env';
 @Module({
@@ -64,6 +65,7 @@ import envConfig from '../config/env';
     ApplyModule,
     FriendModule,
     CronModule,
+    RtcModule,
     SocketModule
   ],
   controllers: [AlertController],
