@@ -23,10 +23,9 @@ export class RtcService {
   constructor(private readonly configService: ConfigService) {}
 
   /**
-   * TURN 凭证下发（多层供应商，自动降级）：
+   * TURN 凭证下发（自动降级）：
    *   1. Cloudflare Realtime TURN（需绑卡，1000GB/月免费）
-   *   2. Metered Open Relay（免费注册即可，无需绑卡，20GB/月）
-   *   3. Cloudflare STUN 兜底（免费不限量、国内可达）
+   *   2. Cloudflare STUN 兜底（免费不限量、国内可达）
    */
   async iceServers(): Promise<IceResult> {
     if (this.cache.iceServers.length && Date.now() - this.cache.at < CACHE_TTL) {
@@ -61,27 +60,7 @@ export class RtcService {
       }
     }
 
-    /* 2. Metered Open Relay（免费账号，无需绑卡） */
-    const meteredApp = String(this.configService.get('METERED_APP_NAME') || '').trim();
-    const meteredKey = String(this.configService.get('METERED_API_KEY') || '').trim();
-    if (meteredApp && meteredKey) {
-      try {
-        const res = await fetch(
-          `https://${encodeURIComponent(meteredApp)}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(meteredKey)}`,
-        );
-        if (!res.ok) throw new Error(`metered turn ${res.status}`);
-        const data: any = await res.json();
-        const iceServers: IceServer[] = Array.isArray(data?.iceServers) ? data.iceServers : [];
-        if (!iceServers.length) throw new Error('empty iceServers');
-
-        this.cache = { at: Date.now(), iceServers, turn: true, provider: 'metered' };
-        return { iceServers, turn: true, provider: 'metered' };
-      } catch (error) {
-        this.logger.warn(`metered turn credential failed: ${(error as Error)?.message || error}`);
-      }
-    }
-
-    /* 3. STUN 兜底，不阻断通话建立 */
+    /* 2. STUN 兜底，不阻断通话建立 */
     return { iceServers: STUN_ONLY, turn: false, provider: 'stun' };
   }
 }
