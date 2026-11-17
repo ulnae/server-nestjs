@@ -23,26 +23,28 @@ export class UserService {
     
   ) { }
 
-  async findeByWhere(where: object, errMsg: string) {
-    try {
+  /**
+   * 唯一性检查。命中就抛 409（冲突）。
+   * 之前这里抛 401，被前端 axios 拦截器当成「登录失效」直接登出；
+   * 外层的 try/catch 又会把所有异常重写成 401，等于把状态码彻底吞掉。
+   */
+  async findeByWhere(where: object, errMsg: string, excludeId?: string) {
     const queryUser = await this.userRepository.findOne({ where: { ...where } });
-    if (queryUser) {
-      throw new HttpException(errMsg, 401);
+    if (queryUser && queryUser.id !== excludeId) {
+      throw new HttpException(errMsg, 409);
     }
-    }catch (error) {
-      console.log(error.message);
-      throw new HttpException(error.message, 401);
-    }
-
   }
 
   async create(createUserDto: CreateUserDto): Promise<string> {
     await this.findeByWhere({ username: createUserDto.username }, '用户名已存在');
     await this.findeByWhere({ email: createUserDto.email }, '邮箱已被注册');
 
-    await this.userRepository.save(Object.assign(createUserDto, {
-      password: await bcrypt.hash(createUserDto.password, 8)
-    }));
+    // 显式挑字段：captcha 只用于校验，不能跟着 save 落库
+    await this.userRepository.save({
+      username: createUserDto.username,
+      email: createUserDto.email,
+      password: await bcrypt.hash(createUserDto.password, 8),
+    });
     return '创建用户成功'
 
   }
@@ -76,7 +78,7 @@ export class UserService {
   async findOne(id: string): Promise<UserInfo> {
     const userInfo = await this.userRepository.findOne({ where: { id, isDeleted: false }, select: ['username', 'id', 'email', 'createdAt', 'updatedAt'] })
     if (!userInfo) {
-      throw new HttpException('该用户不存在', 401);
+      throw new HttpException('该用户不存在', 404);
     }
     return userInfo
   }
@@ -84,16 +86,17 @@ export class UserService {
   async update(id: string, updateUserDto: UpdateUserDto, user: UserInfo) {
     const existUser = await this.userRepository.findOne({ where: { id, isDeleted: false } });
     if (!existUser) {
-      throw new HttpException(`id为${id}的用户不存在`, 401);
+      throw new HttpException(`id为${id}的用户不存在`, 404);
     }
 
     if (user.id !== id) {
-      throw new HttpException('您没有权限更新该用户', 401);
+      throw new HttpException('您没有权限更新该用户', 403);
     }
 
     const updateUserDtoCopy = { ...updateUserDto };
-    updateUserDto.username && await this.findeByWhere({ username: updateUserDto.username }, '用户名已存在');
-    updateUserDto.email && await this.findeByWhere({ email: updateUserDto.email }, '邮箱已被注册');
+    // 排除自己：否则「不改用户名只改邮箱」也会被判成用户名已存在
+    updateUserDto.username && await this.findeByWhere({ username: updateUserDto.username }, '用户名已存在', id);
+    updateUserDto.email && await this.findeByWhere({ email: updateUserDto.email }, '邮箱已被注册', id);
     updateUserDto.password && (updateUserDtoCopy.password = await bcrypt.hash(updateUserDto.password, 8));
     
     const updatePost = this.userRepository.merge(existUser, updateUserDtoCopy);

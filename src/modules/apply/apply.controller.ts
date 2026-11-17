@@ -32,8 +32,8 @@ export class ApplyController {
     summary: '查询房间申请',
   })
   @Get('room')
-  findRoomAll(@Query('id') id: string) {
-    return this.applyService.findRoomAll(id);
+  findRoomAll(@Query('id') id: string, @Req() req) {
+    return this.applyService.findRoomAll(id, req.user?.id);
   }
 
   @ApiOperation({

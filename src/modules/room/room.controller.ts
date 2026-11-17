@@ -48,8 +48,8 @@ export class RoomController {
     summary: '通过id查询房间',
   })
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.roomService.findOne(id);
+  findOne(@Param('id') id: string, @Req() request) {
+    return this.roomService.findOne(id, request.user?.id);
   }
 
   @ApiOperation({

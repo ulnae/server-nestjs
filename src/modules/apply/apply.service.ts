@@ -91,7 +91,15 @@ export class ApplyService {
     });
   }
 
-  findRoomAll(room_id: string) {
+  async findRoomAll(room_id: string, operatorId?: string) {
+    // 入群申请里带着申请人的邮箱：只有群主能看，否则任何登录用户都能按 room_id 拉全表
+    const room = await this.roomRepository.findOne({ where: { id: room_id, isDeleted: false } });
+    if (!room) {
+      throw new HttpException('房间不存在', 404);
+    }
+    if (!operatorId || room.creator !== operatorId) {
+      throw new HttpException('只有群主可以查看入群申请', 403);
+    }
     return this.applyRepository.find({
       where: { room_id, isDeleted: false, handle_status: false }, 
       order: { createdAt: 'DESC' },

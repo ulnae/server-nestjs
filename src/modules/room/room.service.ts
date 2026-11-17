@@ -155,11 +155,12 @@ export class RoomService {
     return { rooms, members, online };
   }
 
-  async findOne(id: string) {    const room = await this.roomRepository.findOne({
-      where: { 
-        id, 
-        isDeleted: false, 
-        // user_info: { isDeleted: false } 
+  async findOne(id: string, operatorId?: string) {
+    const room = await this.roomRepository.findOne({
+      where: {
+        id,
+        isDeleted: false,
+        // user_info: { isDeleted: false }
       },
       select: {
         id: true,
@@ -180,6 +181,13 @@ export class RoomService {
     });
     if (!room) {
       throw new HttpException(`id为${id}的房间不存在`, 404);
+    }
+    // 与 worker 保持一致：群资料只对群成员开放，否则任何登录用户都能按 id 枚举群名与群主邮箱
+    if (operatorId) {
+      const member = await this.memberRepository.findOne({
+        where: { room_id: id, user_id: operatorId, isDeleted: false },
+      });
+      if (!member) throw new HttpException('你不是该房间成员', 403);
     }
     return room;
   }

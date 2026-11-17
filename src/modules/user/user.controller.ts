@@ -2,6 +2,7 @@ import { Controller, Get, Post, Body, Patch, Param, Delete, Req, Query, UseGuard
 import { JwtAuthGuard } from '@/modules/auth/auth.guard';
 import { UserService } from '@/modules/user/user.service';
 import { CreateUserDto } from '@/modules/user/dto/create-user.dto';
+import { LoginUserDto } from '@/modules/user/dto/login-user.dto';
 import { UpdateUserDto } from '@/modules/user/dto/update-user.dto';
 import { UserRo, UserInfo } from '@/modules/user/user.interface';
 // upload.controller.ts
@@ -94,17 +95,17 @@ export class UserController {
     summary: '登录',
   })
   @Post('login')
-  login(@Body() createUserDto: CreateUserDto, @Session() session) {
+  login(@Body() loginUserDto: LoginUserDto, @Session() session) {
     // 校验验证码
     const captcha = session.captcha;
     const captchaExpire = session.captchaExpire;
     if (!captcha || !captchaExpire || Date.now() > captchaExpire) {
       throw new HttpException('Invalid or expired captcha', HttpStatus.BAD_REQUEST);
     }
-    if (captcha.toLowerCase() !== createUserDto.captcha.toLowerCase()) {
+    if (captcha.toLowerCase() !== loginUserDto.captcha.toLowerCase()) {
       throw new HttpException('Incorrect captcha', HttpStatus.BAD_REQUEST);
     }
-    return this.userService.login(createUserDto.username, createUserDto.password);
+    return this.userService.login(loginUserDto.username, loginUserDto.password);
   }
 
   @ApiOperation({
