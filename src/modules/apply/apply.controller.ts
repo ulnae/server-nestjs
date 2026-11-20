@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, Req, UseGuards, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Patch, Param, Delete, Req, UseGuards } from '@nestjs/common';
 import { ApplyService } from '@/modules/apply/apply.service';
 import { CreateApplyDto } from '@/modules/apply/dto/create-apply.dto';
 import { UpdateApplyDto } from '@/modules/apply/dto/update-apply.dto';
@@ -29,15 +29,7 @@ export class ApplyController {
   }
 
   @ApiOperation({
-    summary: '查询房间申请',
-  })
-  @Get('room')
-  findRoomAll(@Query('id') id: string, @Req() req) {
-    return this.applyService.findRoomAll(id, req.user?.id);
-  }
-
-  @ApiOperation({
-    summary: '查询好友申请',
+    summary: '查询待我审批的申请（好友 + 入群统一）',
   })
   @Get('mine')
   findApplyAll(@Req() req) {
@@ -60,7 +52,7 @@ export class ApplyController {
     summary: '删除申请记录',
   })
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.applyService.remove(id);
+  remove(@Param('id') id: string, @Req() req) {
+    return this.applyService.remove(id, req.user.id);
   }
 }

@@ -3,13 +3,28 @@ import { CreateApplyDto } from '@/modules/apply/dto/create-apply.dto';
 import { UpdateApplyDto } from '@/modules/apply/dto/update-apply.dto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ApplyEntity } from '@/modules/apply/entities/apply.entity';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { HttpException } from '@nestjs/common';
 import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
 import { RoomEntity } from '@/modules/room/entities/room.entity';
 import { SocketGateway } from '@/socket/socket.gateway';
 import { Event } from '@/socket/events';
+
+/** 申请列表统一返回字段（好友申请 / 入群申请共用） */
+const APPLY_SELECT = {
+  id: true,
+  user_id: true,
+  room_id: true,
+  apply_user_id: true,
+  status: true,
+  createdAt: true,
+  handle_status: true,
+  updatedAt: true,
+  user_info: { id: true, username: true, email: true },
+  room_info: { id: true, name: true, description: true },
+  apply_user_info: { id: true, username: true, email: true },
+};
 
 @Injectable()
 export class ApplyService {
@@ -58,110 +73,38 @@ export class ApplyService {
     return saved;
   }
 
+  /** 我发起的申请（好友 + 入群） */
   findAll(user_id: string) {
     return this.applyRepository.find({
-      where: { user_id, isDeleted: false }, 
+      where: { user_id, isDeleted: false },
       order: { createdAt: 'DESC' },
       relations: ['user_info', 'room_info', 'apply_user_info'],
-      select: {
-        id: true,
-        user_id: true,
-        room_id: true,
-        apply_user_id: true,
-        status: true,
-        createdAt: true,
-        handle_status: true,
-        updatedAt: true,
-        user_info: {
-          id: true,
-          username: true,
-          email: true,
-        },
-        room_info: {
-          id: true,
-          name: true,
-          description: true,
-        },
-        apply_user_info: {
-          id: true,
-          username: true,
-          email: true,
-        },
-      }
+      select: APPLY_SELECT,
     });
   }
 
-  async findRoomAll(room_id: string, operatorId?: string) {
-    // 入群申请里带着申请人的邮箱：只有群主能看，否则任何登录用户都能按 room_id 拉全表
-    const room = await this.roomRepository.findOne({ where: { id: room_id, isDeleted: false } });
-    if (!room) {
-      throw new HttpException('房间不存在', 404);
-    }
-    if (!operatorId || room.creator !== operatorId) {
-      throw new HttpException('只有群主可以查看入群申请', 403);
-    }
-    return this.applyRepository.find({
-      where: { room_id, isDeleted: false, handle_status: false }, 
-      order: { createdAt: 'DESC' },
-      relations: ['user_info', 'room_info', 'apply_user_info'],
-      select: {
-        id: true,
-        user_id: true,
-        room_id: true,
-        apply_user_id: true,
-        status: true,
-        createdAt: true,
-        handle_status: true,
-        updatedAt: true,
-        user_info: {
-          id: true,
-          username: true,
-          email: true,
-        },
-        room_info: {
-          id: true,
-          name: true,
-          description: true,
-        },
-        apply_user_info: {
-          id: true,
-          username: true,
-          email: true,
-        },
-      }
+  /**
+   * 待我审批的申请 —— 好友申请 + 入群申请统一在一个入口返回：
+   *   1. 好友申请：apply_user_id = 我（别人申请加我为好友）
+   *   2. 入群申请：room_id ∈ 我创建的房间（别人申请加入我的房间，房主视角）
+   * 不再需要单独的「按房间查入群申请」接口，申请页一次拉全。
+   */
+  async findApplyAll(user_id: string) {
+    const ownedRooms = await this.roomRepository.find({
+      where: { creator: user_id, isDeleted: false },
+      select: { id: true },
     });
-  }
+    const ownedRoomIds = ownedRooms.map((room) => room.id);
 
-  findApplyAll(apply_user_id: string) {
+    const where: any[] = [{ apply_user_id: user_id, isDeleted: false }];
+    if (ownedRoomIds.length) {
+      where.push({ room_id: In(ownedRoomIds), isDeleted: false });
+    }
     return this.applyRepository.find({
-      where: { apply_user_id, isDeleted: false }, 
+      where,
       order: { createdAt: 'DESC' },
       relations: ['user_info', 'room_info', 'apply_user_info'],
-      select: {
-        id: true,
-        user_id: true,
-        room_id: true,
-        apply_user_id: true,
-        status: true,
-        createdAt: true,
-        handle_status: true,
-        updatedAt: true,
-        user_info: {
-          id: true,
-          username: true,
-          email: true,
-        },
-        room_info: {
-          id: true,
-          name: true,
-          description: true,
-        },
-        apply_user_info: {
-          id: true,
-          username: true,
-          email: true,
-        },
-      }
+      select: APPLY_SELECT,
     });
   }
 
@@ -259,7 +202,7 @@ export class ApplyService {
     return result;
   }
 
-  async remove(id: string) {
+  async remove(id: string, operatorId?: string) {
     // 检查是否存在
     const apply = await this.applyRepository.findOne({
       where: { id, isDeleted: false },
@@ -270,6 +213,10 @@ export class ApplyService {
     }
     if (apply.handle_status) {
       throw new HttpException('已处理，不能再操作', 409);
+    }
+    // 只能撤回自己发起的申请（与 worker 侧行为对齐）
+    if (!operatorId || apply.user_id !== operatorId) {
+      throw new HttpException('只能撤回自己发起的申请', 403);
     }
     const saved = await this.applyRepository.save(Object.assign(apply, { isDeleted: true }));
 
