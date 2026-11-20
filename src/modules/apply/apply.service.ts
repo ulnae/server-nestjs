@@ -8,6 +8,7 @@ import { HttpException } from '@nestjs/common';
 import { FriendEntity } from '@/modules/friend/entities/friend.entity';
 import { MemberEntity } from '@/modules/member/entities/member.entity';
 import { RoomEntity } from '@/modules/room/entities/room.entity';
+import { UserEntity } from '@/modules/user/entities/user.entity';
 import { SocketGateway } from '@/socket/socket.gateway';
 import { Event } from '@/socket/events';
 
@@ -28,7 +29,11 @@ const APPLY_SELECT = {
 
 @Injectable()
 export class ApplyService {
-  constructor(private readonly socketGateway: SocketGateway) {}
+  constructor(
+    private readonly socketGateway: SocketGateway,
+    @InjectRepository(UserEntity)
+    private userRepository: Repository<UserEntity>,
+  ) {}
 
   // 申请服务
   @InjectRepository(ApplyEntity)
@@ -44,24 +49,51 @@ export class ApplyService {
   private roomRepository: Repository<RoomEntity>
 
   async create(createApplyDto: CreateApplyDto, user_id: string) {
-    // let 
+    const roomId = createApplyDto.room_id;
+    const applyUserId = createApplyDto.apply_user_id;
+    if (!roomId && !applyUserId) {
+      throw new HttpException('缺少 room_id 或 apply_user_id', 400);
+    }
+
+    // 重复申请去重（注意不要污染 DTO：用新对象组装 where）
     const apply = await this.applyRepository.findOne({
-      where: Object.assign(createApplyDto, { user_id, isDeleted: false, handle_status: false }),
+      where: Object.assign({}, createApplyDto, { user_id, isDeleted: false, handle_status: false }),
     })
     if (apply) {
       throw new HttpException('已存在相同申请', 409);
     }
-    const saved = await this.applyRepository.save(Object.assign(createApplyDto, { user_id }));
+
+    // H-2：校验目标有效性，与 worker 侧 routes/apply.js create 完全对齐，
+    // 避免给自己发好友申请、给不存在的用户/房间发申请、重复加好友/入群产生僵尸待办。
+    if (roomId) {
+      const room = await this.roomRepository.findOne({ where: { id: roomId, isDeleted: false } });
+      if (!room) throw new HttpException('房间不存在', 404);
+      const alreadyMember = await this.memberRepository.findOne({
+        where: { room_id: roomId, user_id, isDeleted: false },
+      });
+      if (alreadyMember) throw new HttpException('你已经是该房间成员', 409);
+    }
+    if (applyUserId) {
+      if (applyUserId === user_id) throw new HttpException('不能添加自己为好友', 400);
+      const target = await this.userRepository.findOne({ where: { id: applyUserId, isDeleted: false } });
+      if (!target) throw new HttpException('该用户不存在', 404);
+      const befriended = await this.friendRepository.findOne({
+        where: { creator: user_id, friend_id: applyUserId, isDeleted: false },
+      });
+      if (befriended) throw new HttpException('你们已经是好友了', 409);
+    }
+
+    const saved = await this.applyRepository.save(Object.assign({}, createApplyDto, { user_id }));
 
     // 实时通知接收方：好友申请发给被申请人，入群申请发给房主
     const detail = await this.applyRepository.findOne({
       where: { id: saved.id },
       relations: ['user_info', 'room_info', 'apply_user_info'],
     });
-    if (createApplyDto.apply_user_id) {
-      this.socketGateway.sendToUser(createApplyDto.apply_user_id, Event.FRIEND_REQUEST, { apply: detail });
-    } else if (createApplyDto.room_id) {
-      const room = await this.roomRepository.findOne({ where: { id: createApplyDto.room_id, isDeleted: false } });
+    if (applyUserId) {
+      this.socketGateway.sendToUser(applyUserId, Event.FRIEND_REQUEST, { apply: detail });
+    } else if (roomId) {
+      const room = await this.roomRepository.findOne({ where: { id: roomId, isDeleted: false } });
       if (room) {
         this.socketGateway.sendToUser(room.creator, Event.ROOM_APPLY, {
           apply: detail,
@@ -121,45 +153,53 @@ export class ApplyService {
       throw new HttpException('已处理，不能再操作', 409);
     }
 
+    // 审批权限校验
     if (apply.apply_user_id && apply.apply_user_id !== userId) {
       throw new HttpException('不是被申请人，不能操作', 403);
     }
-    if (apply.apply_user_id) {
-      // todo 申请好友时，判断是否是好友
-      if (updateApplyDto.status) {
-        // 同意好友申请时，判断是否是好友
-        await this.friendRepository.save([
-          {
-            creator: apply.apply_user_id,
-            friend_id: apply.user_id,
-          },
-          {
-            creator: apply.user_id,
-            friend_id: apply.apply_user_id,
-          },
-        ])
-      }
-    }
-
     if (apply.room_id && apply.room_info?.creator !== userId) {
       throw new HttpException('不是房间创建人，不能操作', 403);
     }
-    if (apply.room_id) {
-      // todo 申请加入房间时，判断是否是房间成员
-      if (updateApplyDto.status) {
-        // 同意加入房间时，判断是否是房间成员
-        await this.memberRepository.save({
-          room_id: apply.room_id,
-          user_id: apply.user_id,
-        })
+
+    // H-3：条件更新抢占 —— 只有 handle_status=false 的那个请求能把申请置为已处理。
+    // 并发双击 / 脚本同时提交时，仅一个请求的 affected=1，其余拿不到锁直接 409，
+    // 从根上避免两个请求都通过前置检查后重复建好友/成员关系、重复推送。
+    // 只更新这两个字段：DTO 无 whitelist，透传会把 user_id / room_id 一起写进去。
+    const status = !!updateApplyDto.status;
+    const result = await this.applyRepository.update(
+      { id, isDeleted: false, handle_status: false },
+      { status, handle_status: true },
+    );
+    if (!result.affected) {
+      throw new HttpException('已处理，不能再操作', 409);
+    }
+
+    // 抢占成功后才写入关系。NestJS 的 friend/member 表没有 worker 那样的部分唯一索引，
+    // 这里用「先查后写」的幂等检查兜底（跨来源的重复关系不会因本接口并发而产生）。
+    if (apply.apply_user_id && status) {
+      const pairs = [
+        { creator: apply.apply_user_id, friend_id: apply.user_id },
+        { creator: apply.user_id, friend_id: apply.apply_user_id },
+      ];
+      for (const pair of pairs) {
+        const exists = await this.friendRepository.findOne({
+          where: { ...pair, isDeleted: false },
+        });
+        if (!exists) await this.friendRepository.save(pair);
       }
     }
 
-    // 只取这两个字段：DTO 没有 whitelist，直接透传会把 user_id / room_id 一起写进去
-    const result = await this.applyRepository.update(id, {
-      status: !!updateApplyDto.status,
-      handle_status: true,
-    });
+    if (apply.room_id && status) {
+      const exists = await this.memberRepository.findOne({
+        where: { room_id: apply.room_id, user_id: apply.user_id, isDeleted: false },
+      });
+      if (!exists) {
+        await this.memberRepository.save({
+          room_id: apply.room_id,
+          user_id: apply.user_id,
+        });
+      }
+    }
 
     // 实时通知申请人处理结果（事件名与 worker 侧一致）
     if (apply.apply_user_id) {

@@ -27,8 +27,9 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   @WebSocketServer() wss: Server;
 
   private logger: Logger = new Logger('SocketGateway');
-  // 在线用户：用户id -> socket
-  private users = new Map<string, Socket>();
+  // 在线用户：用户id -> 该用户全部在线 socket（多端/多标签页并存，与 worker 的 userSockets 语义一致）
+  // L-2：从单 socket 改为集合，不再「新连接踢旧连接」
+  private users = new Map<string, Set<Socket>>();
   // 通话会话：通话id -> 会话
   private calls = new Map<string, CallSession>();
   // 用户通话索引：用户id -> 通话id（同一时刻只允许一通通话）
@@ -45,22 +46,57 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     this.logger.log('WebSocket Gateway Initialized');
   }
 
+  // ======================== 多端在线集合辅助（L-2） ========================
+
+  /** 取用户当前全部在线连接 */
+  private userSockets(userId: string): Socket[] {
+    const set = this.users.get(userId);
+    return set ? Array.from(set) : [];
+  }
+
+  /** 用户是否仍在线（任一连接存活即在线） */
+  private isOnline(userId: string): boolean {
+    return (this.users.get(userId)?.size || 0) > 0;
+  }
+
+  /** 注册一条连接（多端并存） */
+  private addSocket(userId: string, client: Socket): void {
+    let set = this.users.get(userId);
+    if (!set) {
+      set = new Set<Socket>();
+      this.users.set(userId, set);
+    }
+    set.add(client);
+  }
+
+  /** 摘除一条连接；返回该用户是否已完全离线 */
+  private removeSocket(userId: string, client: Socket): boolean {
+    const set = this.users.get(userId);
+    if (!set) return true;
+    set.delete(client);
+    if (set.size === 0) {
+      this.users.delete(userId);
+      return true;
+    }
+    return false;
+  }
+
   async handleDisconnect(client: Socket) {
     this.logger.log(`Client disconnected: ${client.id}`);
     if (!client.data.user) return
+    const userId = client.data.user.id;
 
-    if (this.users.get(client.data.user.id) && this.users.get(client.data.user.id)?.id == client.id) {
-      // 用户断线时，结束其进行中的通话并通知对方
-      this.handleDisconnectCalls(client.data.user.id);
-      // 从用户房间中移除用户
-      this.handleResigerRooms(client,'leave');
-      // 获取当前用户所有好友，并通知当前用户已下线
-      await this.handleStatus(client, false);
-      // 从用户映射中移除用户
-      this.users.delete(client.data.user.id);
-    } else {
-      this.logger.log(`Ignored disconnect for old socket of userId: ${client.data.user.id}`);
+    // 只摘除断开的这一条连接；多端场景下其它连接仍在线时不算整体下线。
+    const offline = this.removeSocket(userId, client);
+    if (!offline) {
+      this.logger.log(`One socket of userId ${userId} disconnected, but other sessions still online`);
+      return;
     }
+
+    // 最后一条连接断开 → 真正离线：结束通话、从房间移除、通知好友下线
+    this.handleDisconnectCalls(userId);
+    this.handleResigerRooms(client, 'leave');
+    await this.handleStatus(client, false);
   }
 
   handleConnection(client: Socket) {
@@ -73,16 +109,24 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * @param message 
    */
   @SubscribeMessage(Event.SEND_USER)
-  handleMessageUser(client: Socket, message: { to: string; content: string; clientId?: string; type?: string; size?: number }): void {
+  async handleMessageUser(client: Socket, message: { to: string; content: string; clientId?: string; type?: string; size?: number }): Promise<void> {
     if (!message?.to) return;
+    const from = client.data.user.id;
     const to = message.to;
-    // 收发双方使用同一个事件：收信人靠 from 判断发送者，发送方靠 clientId 对账乐观消息
-    const payload = Object.assign({}, message, {
-      from: client.data.user.id,
-      to,
-      timestamp: Date.now(),
+    if (to === from) return;
+
+    // M-3：只允许给好友发私聊。好友关系是双向两条记录，查「我 -> 对方」这一条即可。
+    // 对比房间消息已校验 membership，私聊此前完全不校验，任何人可给任意用户灌消息。
+    const isFriend = await this.friendRepository.findOne({
+      where: { creator: from, friend_id: to, isDeleted: false },
     });
-    this.users.get(to)?.emit(Event.MESSAGE_USER, payload);
+    if (!isFriend) return;
+
+    // 只挑白名单字段，避免把客户端额外塞进 message 的字段透传给收信人
+    const { content, clientId, type, size } = message;
+    const payload = { content, clientId, type, size, from, to, timestamp: Date.now() };
+    // 多端：发给对方所有在线连接，以及自己的其它端（消息可在多设备同步）
+    this.sendToUser(to, Event.MESSAGE_USER, payload);
     client.emit(Event.MESSAGE_USER, payload);
   }
 
@@ -115,15 +159,10 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   @SubscribeMessage(Event.INIT)
   async handleInit(client: Socket): Promise<void> {
     this.logger.log(`init 当前用户信息: id: ${client.data.user.id}, username: ${client.data.user.username}`);
-    // 踢掉其他地方登录的账号（worker 允许多端，这里保留单端语义，见 realtime-contract.md）
-    this.users.get(client.data.user.id)?.emit(Event.KICKED, { 
-      reason: 'Account logged in elsewhere', 
-      timestamp: Date.now() 
-    });
-    this.users.get(client.data.user.id)?.disconnect(true)
-    // 记录用户id和对应的client映射关系
-    this.users.set(client.data.user.id, client);
-    
+    // L-2：多端并存，不再踢掉其它地方的登录（与 worker 的 onInit 一致）。
+    // 只把当前连接加入该用户的在线集合；KICKED 事件保留仅作前向兼容，服务端不再主动发。
+    this.addSocket(client.data.user.id, client);
+
     // 获取当前用户所有好友，并通知当前用户已上线
     await this.handleStatus(client, true);
  
@@ -182,16 +221,13 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       },
     });
     const onlineFriends:string[] = [];
-    // 通知所有好友当前用户状态
+    // 通知所有好友当前用户状态（多端：发给好友的每条在线连接）
     friends.forEach(friend => {
-      const receiver = this.users.get(friend.friend_id);
-      if (receiver) {
+      const receivers = this.userSockets(friend.friend_id);
+      if (receivers.length) {
         onlineFriends.push(friend.friend_id);
-        receiver.emit(Event.STATUS_FRIEND, {
-          userId: friend.creator,
-          status,
-          timestamp: Date.now()
-        });
+        const payload = { userId: friend.creator, status, timestamp: Date.now() };
+        receivers.forEach(receiver => receiver.emit(Event.STATUS_FRIEND, payload));
       }
     });
 
@@ -206,10 +242,10 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   // apply / friend / member / room 模块完成写操作后调用下面三个方法，
   // 事件名与 worker 侧（src/durable/hub.js）保持一致，前端只写一套监听。
 
-  /** 推给某个用户（在线才会收到） */
+  /** 推给某个用户的全部在线连接（多端都会收到） */
   sendToUser(userId: string, event: string, data: any): void {
     if (!userId) return;
-    this.users.get(userId)?.emit(event, data);
+    this.userSockets(userId).forEach(socket => socket.emit(event, data));
   }
 
   /** 推给某个房间的在线成员；excludeUserId 用于排除操作者自己 */
@@ -219,28 +255,32 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       this.wss.to(roomId).emit(event, data);
       return;
     }
-    this.users.forEach((socket, userId) => {
+    this.users.forEach((sockets, userId) => {
       if (userId === excludeUserId) return;
-      if (socket.rooms.has(roomId)) socket.emit(event, data);
+      sockets.forEach(socket => {
+        if (socket.rooms.has(roomId)) socket.emit(event, data);
+      });
     });
   }
 
-  /** 成员关系变化后同步房间订阅：新加入的能收消息，退出的收不到 */
+  /** 成员关系变化后同步房间订阅：新加入的能收消息，退出的收不到（多端：同步该用户全部连接） */
   async syncUserRooms(userId: string): Promise<void> {
     if (!userId) return;
-    const socket = this.users.get(userId);
-    if (!socket) return;
+    const sockets = this.userSockets(userId);
+    if (!sockets.length) return;
 
     const members = await this.memberRepository.find({
       where: { user_id: userId, isDeleted: false },
     });
     const target = new Set((members || []).map(item => item.room_id));
 
-    socket.rooms.forEach((room: string) => {
-      if (room === socket.id) return;
-      if (!target.has(room)) socket.leave(room);
-    });
-    target.forEach(room => socket.join(room));
+    for (const socket of sockets) {
+      socket.rooms.forEach((room: string) => {
+        if (room === socket.id) return;
+        if (!target.has(room)) socket.leave(room);
+      });
+      target.forEach(room => socket.join(room));
+    }
   }
 
   /**
@@ -288,20 +328,20 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    */
   async pushUserStatus(userId: string): Promise<void> {
     if (!userId) return;
-    const online = this.users.has(userId);
+    const online = this.isOnline(userId);
     const friends = await this.friendRepository.find({
       where: { creator: userId, isDeleted: false },
     });
     for (const friend of friends) {
-      // 告诉好友我的当前状态
-      this.users.get(friend.friend_id)?.emit(Event.STATUS_FRIEND, {
+      // 告诉好友我的当前状态（多端：好友的每个连接都收到）
+      this.sendToUser(friend.friend_id, Event.STATUS_FRIEND, {
         userId,
         status: online,
         timestamp: Date.now(),
       });
       // 告诉我哪些好友当前在线
-      if (online && this.users.has(friend.friend_id)) {
-        this.users.get(userId)?.emit(Event.STATUS_FRIEND, {
+      if (online && this.isOnline(friend.friend_id)) {
+        this.sendToUser(userId, Event.STATUS_FRIEND, {
           userId: friend.friend_id,
           status: true,
           timestamp: Date.now(),
@@ -344,19 +384,18 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
     const isCaller = session.caller === userId;
     const peerId = isCaller ? session.callee : session.caller;
-    const peer = this.users.get(peerId);
 
-    if (peer) {
+    if (this.isOnline(peerId)) {
       if (session.status === 'ringing') {
         // 振铃阶段断线：主叫离开通知被叫取消，被叫离开通知主叫拒绝
-        peer.emit(isCaller ? 'call:canceled' : 'call:rejected', {
+        this.sendToUser(peerId, isCaller ? 'call:canceled' : 'call:rejected', {
           callId,
           reason: 'unavailable',
           timestamp: Date.now(),
         });
       } else {
         // 通话阶段断线：通知对方通话结束
-        peer.emit(Event.CALL_ENDED, {
+        this.sendToUser(peerId, Event.CALL_ENDED, {
           callId,
           reason: 'offline',
           timestamp: Date.now(),
@@ -385,9 +424,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       return;
     }
 
-    const callee = this.users.get(calleeId);
     // 被叫不在线
-    if (!callee) {
+    if (!this.isOnline(calleeId)) {
       client.emit(Event.CALL_ERROR, { to: calleeId, reason: 'offline', timestamp: Date.now() });
       return;
     }
@@ -411,8 +449,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     session.ringTimeout = setTimeout(() => {
       const current = this.calls.get(callId);
       if (!current || current.status !== 'ringing') return;
-      this.users.get(current.caller)?.emit(Event.CALL_TIMEOUT, { callId, timestamp: Date.now() });
-      this.users.get(current.callee)?.emit(Event.CALL_CANCELED, { callId, reason: 'timeout', timestamp: Date.now() });
+      this.sendToUser(current.caller, Event.CALL_TIMEOUT, { callId, timestamp: Date.now() });
+      this.sendToUser(current.callee, Event.CALL_CANCELED, { callId, reason: 'timeout', timestamp: Date.now() });
       this.releaseCall(current);
       this.logger.log(`Call ${callId} timeout`);
     }, CALL_RING_TIMEOUT);
@@ -422,7 +460,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     this.userCallMap.set(calleeId, callId);
 
     // 通知被叫有来电
-    callee.emit(Event.CALL_INCOMING, {
+    this.sendToUser(calleeId, Event.CALL_INCOMING, {
       callId,
       from: callerId,
       username: client.data.user.username,
@@ -444,9 +482,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       return;
     }
 
-    const caller = this.users.get(session.caller);
     // 主叫已离开
-    if (!caller) {
+    if (!this.isOnline(session.caller)) {
       this.releaseCall(session);
       client.emit(Event.CALL_ENDED, { callId: session.id, reason: 'offline', timestamp: Date.now() });
       return;
@@ -457,7 +494,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       session.ringTimeout = null;
     }
     session.status = 'active';
-    caller.emit(Event.CALL_ACCEPTED, { callId: session.id, from: session.callee, timestamp: Date.now() });
+    this.sendToUser(session.caller, Event.CALL_ACCEPTED, { callId: session.id, from: session.callee, timestamp: Date.now() });
     this.logger.log(`Call ${session.id} accepted by ${session.callee}`);
   }
 
@@ -469,7 +506,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     const session = this.calls.get(payload?.callId);
     if (!session || session.callee !== client.data.user.id) return;
 
-    this.users.get(session.caller)?.emit(Event.CALL_REJECTED, {
+    this.sendToUser(session.caller, Event.CALL_REJECTED, {
       callId: session.id,
       timestamp: Date.now(),
     });
@@ -485,7 +522,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     const session = this.calls.get(payload?.callId);
     if (!session || session.caller !== client.data.user.id) return;
 
-    this.users.get(session.callee)?.emit(Event.CALL_CANCELED, {
+    this.sendToUser(session.callee, Event.CALL_CANCELED, {
       callId: session.id,
       timestamp: Date.now(),
     });
@@ -505,7 +542,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     if (session.caller !== userId && session.callee !== userId) return;
 
     const peerId = session.caller === userId ? session.callee : session.caller;
-    this.users.get(peerId)?.emit(Event.CALL_ENDED, {
+    this.sendToUser(peerId, Event.CALL_ENDED, {
       callId: session.id,
       reason: 'hangup',
       timestamp: Date.now(),
@@ -521,11 +558,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   handleWebRtcOffer(client: Socket, payload: { callId: string; sdp: RtcSdpMessage }): void {
     const peer = this.getCallPeer(client, payload?.callId);
     if (!peer) return;
-    peer.socket.emit(Event.WEBRTC_OFFER, {
-      callId: peer.session.id,
-      from: client.data.user.id,
-      sdp: payload.sdp,
-    });
+    const data = { callId: peer.session.id, from: client.data.user.id, sdp: payload.sdp };
+    peer.sockets.forEach(socket => socket.emit(Event.WEBRTC_OFFER, data));
   }
 
   /**
@@ -535,11 +569,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   handleWebRtcAnswer(client: Socket, payload: { callId: string; sdp: RtcSdpMessage }): void {
     const peer = this.getCallPeer(client, payload?.callId);
     if (!peer) return;
-    peer.socket.emit(Event.WEBRTC_ANSWER, {
-      callId: peer.session.id,
-      from: client.data.user.id,
-      sdp: payload.sdp,
-    });
+    const data = { callId: peer.session.id, from: client.data.user.id, sdp: payload.sdp };
+    peer.sockets.forEach(socket => socket.emit(Event.WEBRTC_ANSWER, data));
   }
 
   /**
@@ -549,17 +580,14 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   handleWebRtcCandidate(client: Socket, payload: { callId: string; candidate: RtcCandidateMessage }): void {
     const peer = this.getCallPeer(client, payload?.callId);
     if (!peer) return;
-    peer.socket.emit(Event.WEBRTC_CANDIDATE, {
-      callId: peer.session.id,
-      from: client.data.user.id,
-      candidate: payload.candidate,
-    });
+    const data = { callId: peer.session.id, from: client.data.user.id, candidate: payload.candidate };
+    peer.sockets.forEach(socket => socket.emit(Event.WEBRTC_CANDIDATE, data));
   }
 
   /**
-   * 校验当前用户属于通话且通话已接通，返回对方socket与会话
+   * 校验当前用户属于通话且通话已接通，返回对方的全部在线连接与会话（多端对齐 worker）
    */
-  private getCallPeer(client: Socket, callId: string): { socket: Socket; session: CallSession } | null {
+  private getCallPeer(client: Socket, callId: string): { sockets: Socket[]; session: CallSession } | null {
     const session = this.calls.get(callId);
     if (!session || session.status !== 'active') return null;
 
@@ -567,10 +595,10 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     if (session.caller !== userId && session.callee !== userId) return null;
 
     const peerId = session.caller === userId ? session.callee : session.caller;
-    const peerSocket = this.users.get(peerId);
-    if (!peerSocket) return null;
+    const sockets = this.userSockets(peerId);
+    if (!sockets.length) return null;
 
-    return { socket: peerSocket, session };
+    return { sockets, session };
   }
   // ======================== 语音通话信令 END ========================
 }

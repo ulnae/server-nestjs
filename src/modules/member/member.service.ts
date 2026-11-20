@@ -126,6 +126,13 @@ export class MemberService {
       throw new HttpException('只有群主可以移出成员', 403);
     }
 
+    // M-2：群主不能以「退出房间」的方式离开。否则会留下「已不在成员表、但 room.creator
+    // 仍是他」的幽灵管理员——收不到房间消息、却仍能改名/解散，房间也无人能正常接管。
+    // 群主要离开必须先解散房间（前端群主按钮本就是「解散房间」，这里防直接调 API）。
+    if (isSelf && isOwner) {
+      throw new HttpException('群主不能直接退出房间，请先解散房间', 409);
+    }
+
     member.isDeleted = true;
     const saved = await this.memberRepository.save(member);
 
