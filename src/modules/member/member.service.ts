@@ -164,6 +164,10 @@ export class MemberService {
       member.user_id,
     );
 
+    // 退出 / 被踢后房间在线集合变了，补发一次在线名单。
+    // 否则其余成员的房间列表在线人数停留在旧值（分子没减、分母已减）。
+    await this.socketGateway.pushRoomOnline(roomId);
+
     return saved;
   }
 }

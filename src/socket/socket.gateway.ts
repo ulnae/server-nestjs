@@ -277,7 +277,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     const sockets = await this.wss.in(roomId).fetchSockets();
     this.wss.to(roomId).emit(Event.ONLINE_ROOM, {
       roomId,
-      users: sockets.map(socket => socket.data.user?.id),
+      users: sockets.map(socket => socket.data.user?.id).filter(Boolean),
       timestamp: Date.now(),
     });
   }
