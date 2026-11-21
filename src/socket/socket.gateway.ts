@@ -90,14 +90,22 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
     // 只摘除断开的这一条连接；多端场景下其它连接仍在线时不算整体下线。
     const offline = this.removeSocket(userId, client);
-    if (!offline) {
+    // 复核：极端竞态下（集合被并发的 init 重建）不误判整体下线
+    if (!offline || this.isOnline(userId)) {
       this.logger.log(`One socket of userId ${userId} disconnected, but other sessions still online`);
       return;
     }
 
     // 最后一条连接断开 → 真正离线：结束通话、从房间移除、通知好友下线
     this.handleDisconnectCalls(userId);
-    this.handleResigerRooms(client, 'leave');
+    // 必须等房间名单更新完成再广播好友下线：之前浮空 Promise 无人接管异常，
+    // 还可能与 handleStatus 并发导致「好友先收到离线、房间名单后更新」的乱序
+    try {
+      await this.handleResigerRooms(client, 'leave');
+    } catch (err: any) {
+      // 名单更新失败不应吞掉好友下线广播，否则用户会"幽灵在线"
+      this.logger.warn(`handleResigerRooms(leave) failed: ${err?.message || err}`);
+    }
     await this.handleStatus(client, false);
   }
 
@@ -159,7 +167,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
  * @param room 
  */
   @SubscribeMessage(Event.INIT)
-  async handleInit(client: Socket): Promise<void> {
+  async handleInit(client: Socket): Promise<object> {
     this.logger.log(`init 当前用户信息: id: ${client.data.user.id}, username: ${client.data.user.username}`);
     // L-2：多端并存，不再踢掉其它地方的登录（与 worker 的 onInit 一致）。
     // 只把当前连接加入该用户的在线集合；KICKED 事件保留仅作前向兼容，服务端不再主动发。
@@ -167,17 +175,23 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
 
     // 获取当前用户所有好友，并通知当前用户已上线
     await this.handleStatus(client, true);
- 
+
     // 获取当前用户所有房间，通知当前用户已加入房间
-    await this.handleResigerRooms(client);
+    const roomIds = await this.handleResigerRooms(client);
+
+    // ack：客户端可用回调拿到登记完成后的房间与在线名单（worker 端暂不支持 ack，前端保持兼容不依赖它）
+    const online: Record<string, string[]> = {};
+    for (const roomId of roomIds) online[roomId] = this.roomOnlineSnapshot.get(roomId) || [];
+    return { rooms: roomIds, online, timestamp: Date.now() };
   }
 
 
   /**
    * 初始化用户所加入的房间
-   * @param client 
+   * @param client
+   * @returns 该用户加入的全部房间 id（供 init ack 使用）
    */
-  async handleResigerRooms(client: Socket, type: 'join' | 'leave' = 'join') {
+  async handleResigerRooms(client: Socket, type: 'join' | 'leave' = 'join'): Promise<string[]> {
     const rooms = await this.memberRepository.find({
       where: {
         user_id: client.data.user.id,
@@ -187,22 +201,23 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     });
     const roomIds = (rooms || []).map(room => room.room_id).filter(Boolean);
     for (const roomId of roomIds) client[type](roomId);
-    if (!roomIds.length) return;
+    if (!roomIds.length) return roomIds;
 
     /* 一次拉全：之前是 forEach + 每房间一次 fetchSockets（跨节点 RPC），
        房间多时初始化会明显变慢；另外 forEach 的 async 回调是浮空 Promise，异常无人接管 */
     const sockets = await this.wss.in(roomIds).fetchSockets();
-    const onlineByRoom = new Map<string, string[]>();
+    const onlineByRoom = new Map<string, Set<string>>();
     for (const socket of sockets) {
       for (const roomId of socket.rooms) {
         if (!roomIds.includes(roomId)) continue;
-        const list = onlineByRoom.get(roomId) || [];
-        if (socket.data.user?.id) list.push(socket.data.user.id);
+        const list = onlineByRoom.get(roomId) || new Set<string>();
+        if (socket.data.user?.id) list.add(socket.data.user.id);
         onlineByRoom.set(roomId, list);
       }
     }
     for (const roomId of roomIds) {
-      const users = onlineByRoom.get(roomId) || [];
+      // 名单统一去重：多端/多标签页同账号会出现重复 id，污染快照与差分
+      const users = [...(onlineByRoom.get(roomId) || [])];
       const payload = { roomId, users, timestamp: Date.now() };
       if (this.roomOnlineChanged(roomId, users)) {
         // 名单有变化：广播给全屋
@@ -213,6 +228,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       }
       // type === 'leave' 且名单没变：该用户其实仍在线，什么都不发
     }
+    return roomIds;
   }
 
   /**
@@ -315,12 +331,18 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     for (const id of ids) result[id] = [];
     if (!ids.length) return result;
     const sockets = await this.wss.in(ids).fetchSockets();
+    // 用 Set 收集：多端/多标签页同账号不产生重复 id（overview 的在线名单直接采用）
+    const byRoom = new Map<string, Set<string>>();
     for (const socket of sockets) {
       for (const roomId of socket.rooms) {
-        if (!result[roomId]) continue;
-        if (socket.data.user?.id) result[roomId].push(socket.data.user.id);
+        if (ids.includes(roomId) && socket.data.user?.id) {
+          const list = byRoom.get(roomId) || new Set<string>();
+          list.add(socket.data.user.id);
+          byRoom.set(roomId, list);
+        }
       }
     }
+    byRoom.forEach((list, roomId) => { result[roomId] = [...list]; });
     return result;
   }
 
@@ -331,7 +353,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   async pushRoomOnline(roomId: string): Promise<void> {
     if (!roomId) return;
     const sockets = await this.wss.in(roomId).fetchSockets();
-    const users = sockets.map(socket => socket.data.user?.id).filter(Boolean);
+    // 去重：多端同账号会产生重复 id，污染快照与差分
+    const users = [...new Set(sockets.map(socket => socket.data.user?.id).filter(Boolean))];
     // 名单 diff：没变化就不广播给全屋（对齐契约 line49 与 worker 的 roomOnlineChanged），
     // 避免写操作（尤其被踢/退出）引发无意义的全屋在线人数刷新
     if (!this.roomOnlineChanged(roomId, users)) return;
