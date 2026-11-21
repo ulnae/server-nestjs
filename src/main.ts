@@ -71,7 +71,7 @@ async function bootstrap() {
   app.enableCors({
     origin: allowOrigins.length ? allowOrigins : false,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // 允许的 HTTP 方法
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-alert-secret'], // 允许的请求头
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-alert-secret', 'Base-Version'], // 允许的请求头
     credentials: true, // 是否允许携带凭证（如 Cookie）
     maxAge: 3600, // 预检请求的有效期（单位：秒）
   });
