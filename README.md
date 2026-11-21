@@ -234,46 +234,48 @@ socket.on('connect', () => {
   socket.emit('init');
 });
 
-// 监听普通消息
-socket.on('message', (data) => {
-  console.log('Received message:', data);
-});
-
-// 监听单对单消息
-socket.on('user', (data) => {
-  console.log('Received private message:', data);
+// 监听私聊消息（message:user，靠 from 区分来源）
+socket.on('message:user', (data) => {
+  console.log('Received private message from', data.from, ':', data.content);
 });
 
 // 监听房间消息
-socket.on('room', (data) => {
-  console.log('Received room message:', data);
+socket.on('message:room', (data) => {
+  console.log('Received room message in', data.roomId, 'from', data.from, ':', data.content);
 });
 
-// 监听在线状态
-socket.on('online', (data) => {
-  console.log('Online users in room:', data);
+// 监听房间在线成员名单（换房/成员变动/init 后收到，data.users 是在线用户 id 数组）
+socket.on('online:room', (data) => {
+  console.log('Online users in room', data.roomId, ':', data.users);
 });
 
-// 监听好友状态
-socket.on('status', (data) => {
-  console.log('Friend status changed:', data);
+// 监听登录时一次性下发的在线好友 id 列表
+socket.on('online:friends', (data) => {
+  console.log('Online friends:', data.users);
+});
+
+// 监听好友上下线（data.userId + data.status）
+socket.on('status:friend', (data) => {
+  console.log('Friend status changed:', data.userId, data.status ? 'online' : 'offline');
 });
 
 // 监听系统警报
-socket.on('alert', (data) => {
-  console.log('System alert:', data);
+socket.on('system:alert', (data) => {
+  console.log('System alert:', data.message);
 });
 
-// 发送单对单消息
-socket.emit('user', {
-  sender: 'target-user-id',
-  message: 'Hello!'
+// 发送单对单消息（to 是接收方 userId）
+socket.emit('send:user', {
+  to: 'target-user-id',
+  content: 'Hello!',
+  clientId: 'c-1'
 });
 
 // 发送房间消息
-socket.emit('room', {
-  room: 'room-id',
-  message: 'Hello room!'
+socket.emit('send:room', {
+  roomId: 'room-id',
+  content: 'Hello room!',
+  clientId: 'c-2'
 });
 ```
 

@@ -268,6 +268,8 @@ export class RoomService {
     for (const member of members || []) {
       await this.socketGateway.syncUserRooms(member.user_id);
     }
+    // 房间已解散，清掉在线名单快照，避免内存残留（对齐 worker 的 /drop-room）
+    this.socketGateway.clearRoomOnlineSnapshot(room.id);
     return '删除房间成功'
   }
 }

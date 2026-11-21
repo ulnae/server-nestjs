@@ -30,6 +30,8 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   // 在线用户：用户id -> 该用户全部在线 socket（多端/多标签页并存，与 worker 的 userSockets 语义一致）
   // L-2：从单 socket 改为集合，不再「新连接踢旧连接」
   private users = new Map<string, Set<Socket>>();
+  // 房间在线名单快照：roomId -> 上一次广播的排序后名单，用于名单 diff（重连风暴防护，与 worker 的 roomOnlineChanged 对齐）
+  private roomOnlineSnapshot = new Map<string, string[]>();
   // 通话会话：通话id -> 会话
   private calls = new Map<string, CallSession>();
   // 用户通话索引：用户id -> 通话id（同一时刻只允许一通通话）
@@ -200,11 +202,16 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       }
     }
     for (const roomId of roomIds) {
-      this.wss.to(roomId).emit(Event.ONLINE_ROOM, {
-        roomId,
-        users: onlineByRoom.get(roomId) || [],
-        timestamp: Date.now(),
-      });
+      const users = onlineByRoom.get(roomId) || [];
+      const payload = { roomId, users, timestamp: Date.now() };
+      if (this.roomOnlineChanged(roomId, users)) {
+        // 名单有变化：广播给全屋
+        this.wss.to(roomId).emit(Event.ONLINE_ROOM, payload);
+      } else if (type === 'join') {
+        // 名单没变（重连 / 多端另一条连接仍在线）：只补发本人，不惊动全屋（对齐 worker 的重连风暴防护）
+        client.emit(Event.ONLINE_ROOM, payload);
+      }
+      // type === 'leave' 且名单没变：该用户其实仍在线，什么都不发
     }
   }
 
@@ -284,12 +291,21 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   }
 
   /**
-   * 查询某房间当前在线用户 id 列表（供聚合接口 /room/overview 使用）
+   * 记录并比对房间在线名单（与 worker 的 roomOnlineChanged / 契约 realtime-contract.md 对齐）。
+   * 名单排序后与快照比较：有变化则更新快照并返回 true（需要广播给全屋），
+   * 无变化返回 false（重连/多端场景名单没变，只补发触发者本人即可，不惊动全屋）。
    */
-  async roomOnline(roomId: string): Promise<string[]> {
-    if (!roomId) return [];
-    const sockets = await this.wss.in(roomId).fetchSockets();
-    return sockets.map(socket => socket.data.user?.id).filter(Boolean);
+  private roomOnlineChanged(roomId: string, users: string[]): boolean {
+    const sorted = [...users].sort();
+    const prev = this.roomOnlineSnapshot.get(roomId);
+    if (prev && JSON.stringify(prev) === JSON.stringify(sorted)) return false;
+    this.roomOnlineSnapshot.set(roomId, sorted);
+    return true;
+  }
+
+  /** 房间解散后清掉快照，避免残留（对齐 worker 的 /drop-room） */
+  clearRoomOnlineSnapshot(roomId: string): void {
+    this.roomOnlineSnapshot.delete(roomId);
   }
 
   /** 批量版本：一次 fetchSockets 拿回多个房间的在线名单（overview 用） */
@@ -315,9 +331,13 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   async pushRoomOnline(roomId: string): Promise<void> {
     if (!roomId) return;
     const sockets = await this.wss.in(roomId).fetchSockets();
+    const users = sockets.map(socket => socket.data.user?.id).filter(Boolean);
+    // 名单 diff：没变化就不广播给全屋（对齐契约 line49 与 worker 的 roomOnlineChanged），
+    // 避免写操作（尤其被踢/退出）引发无意义的全屋在线人数刷新
+    if (!this.roomOnlineChanged(roomId, users)) return;
     this.wss.to(roomId).emit(Event.ONLINE_ROOM, {
       roomId,
-      users: sockets.map(socket => socket.data.user?.id).filter(Boolean),
+      users,
       timestamp: Date.now(),
     });
   }
