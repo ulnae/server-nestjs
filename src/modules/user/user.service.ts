@@ -93,14 +93,37 @@ export class UserService {
       throw new HttpException('您没有权限更新该用户', 403);
     }
 
-    const updateUserDtoCopy = { ...updateUserDto };
-    // 排除自己：否则「不改用户名只改邮箱」也会被判成用户名已存在
-    updateUserDto.username && await this.findeByWhere({ username: updateUserDto.username }, '用户名已存在', id);
-    updateUserDto.email && await this.findeByWhere({ email: updateUserDto.email }, '邮箱已被注册', id);
-    updateUserDto.password && (updateUserDtoCopy.password = await bcrypt.hash(updateUserDto.password, 8));
-    
-    const updatePost = this.userRepository.merge(existUser, updateUserDtoCopy);
-    await this.userRepository.save(updatePost);
+    /* 一次更新用户名 / 邮箱 / 密码。
+       改密码或邮箱时必须带原密码（oldPassword）确认身份，避免持有 token 即可裸改。 */
+    const oldPassword = String(updateUserDto.oldPassword || '');
+    const password = updateUserDto.password ? String(updateUserDto.password) : '';
+    const email = updateUserDto.email ? String(updateUserDto.email).trim() : '';
+    const wantPassword = !!password;
+    const wantEmail = !!email && email !== existUser.email;
+    if (wantPassword || wantEmail) {
+      if (!oldPassword || !(await bcrypt.compare(oldPassword, existUser.password))) {
+        throw new HttpException('原密码错误', 400);
+      }
+    }
+
+    const updatePost: any = {};
+    if (updateUserDto.username && updateUserDto.username !== existUser.username) {
+      await this.findeByWhere({ username: updateUserDto.username }, '用户名已存在', id);
+      updatePost.username = updateUserDto.username;
+    }
+    if (wantEmail) {
+      await this.findeByWhere({ email }, '邮箱已被注册', id);
+      updatePost.email = email;
+    }
+    if (wantPassword) {
+      if (password.length < 6 || password.length > 32) {
+        throw new HttpException('密码长度需为 6-32 位', 400);
+      }
+      updatePost.password = await bcrypt.hash(password, 8);
+    }
+
+    const merged = this.userRepository.merge(existUser, updatePost);
+    await this.userRepository.save(merged);
     return '更新用户成功'
   }
 

@@ -1,8 +1,10 @@
 import { IsOptional, IsString } from 'class-validator';
 
 /**
- * 更新用户。刻意不从 CreateUserDto 派生：否则 captcha 也会成为可更新字段，
- * whitelist 放行后会被 merge 进实体（虽然目前实体会忽略未知列，但语义上是错的）。
+ * 更新用户：一次可改用户名 / 邮箱 / 密码。
+ * 刻意不从 CreateUserDto 派生，避免 captcha 成为可更新字段。
+ *
+ * oldPassword：改密码或邮箱时必填，服务端校验身份，防止持有 token 即可裸改。
  */
 export class UpdateUserDto {
     @IsOptional()
@@ -11,9 +13,13 @@ export class UpdateUserDto {
 
     @IsOptional()
     @IsString()
+    email?: string;
+
+    @IsOptional()
+    @IsString()
     password?: string;
 
     @IsOptional()
     @IsString()
-    email?: string;
+    oldPassword?: string;
 }
