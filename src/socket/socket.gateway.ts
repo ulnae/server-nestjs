@@ -119,7 +119,10 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    * @param message 
    */
   @SubscribeMessage(Event.SEND_USER)
-  async handleMessageUser(client: Socket, message: { to: string; content: string; clientId?: string; type?: string; size?: number }): Promise<void> {
+  async handleMessageUser(client: Socket, message: {
+    to: string; content: string; clientId?: string; type?: string; size?: number;
+    originalname?: string; mentions?: { id: string; name: string }[]
+  }): Promise<void> {
     if (!message?.to) return;
     const from = client.data.user.id;
     const to = message.to;
@@ -133,8 +136,9 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     if (!isFriend) return;
 
     // 只挑白名单字段，避免把客户端额外塞进 message 的字段透传给收信人
-    const { content, clientId, type, size } = message;
-    const payload = { content, clientId, type, size, from, to, timestamp: Date.now() };
+    // originalname（文件名）与 mentions（@ 成员）属于业务字段，契约要求随消息回显
+    const { content, clientId, type, size, originalname, mentions } = message;
+    const payload = { content, clientId, type, size, originalname, mentions, from, to, timestamp: Date.now() };
     // 多端：发给对方所有在线连接，以及自己的其它端（消息可在多设备同步）
     this.sendToUser(to, Event.MESSAGE_USER, payload);
     client.emit(Event.MESSAGE_USER, payload);
