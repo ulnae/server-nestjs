@@ -18,7 +18,7 @@ export class WsJwtAuthGuard implements CanActivate {
     // 从连接的 query 参数中提取 token（客户端传递的参数）
     let token = client.handshake.auth.token;
     if (!token) {
-      throw new WsException('WebSocket 连接缺少 Token'); // WebSocket 专用异常
+      throw new WsException({ message: 'WebSocket 连接缺少 Token', i18nKey: 'error.auth.wsTokenMissing' }); // WebSocket 专用异常
     }
 
 
@@ -40,13 +40,13 @@ export class WsJwtAuthGuard implements CanActivate {
       // 处理不同类型的错误
       if (error.name === 'TokenExpiredError') {
         // 令牌过期
-        throw new WsException('令牌已过期');
+        throw new WsException({ message: '令牌已过期', i18nKey: 'error.auth.tokenExpired' });
       } else if (error.name === 'JsonWebTokenError') {
         // 令牌无效（如签名错误、格式错误）
-        throw new WsException('无效的令牌');
+        throw new WsException({ message: '无效的令牌', i18nKey: 'error.auth.invalidToken' });
       } else {
         // 其他错误
-        throw new WsException('令牌验证失败');
+        throw new WsException({ message: '令牌验证失败', i18nKey: 'error.auth.verifyFailed' });
       }
 
     }

@@ -23,11 +23,11 @@ export class FriendService {
     // creator 只能取当前登录用户：以前直接用 body 里的值，等于允许任何人伪造「别人加了你」
     const creator = operatorId;
     const friendId = createFriendDto.friend_id;
-    if (!friendId) throw new HttpException('缺少 friend_id', 400);
-    if (friendId === creator) throw new HttpException('不能添加自己为好友', 400);
+    if (!friendId) throw new HttpException({ message: '缺少 friend_id', i18nKey: 'error.friend.requireFriendId' }, 400);
+    if (friendId === creator) throw new HttpException({ message: '不能添加自己为好友', i18nKey: 'error.friend.cannotAddSelf' }, 400);
 
     const target = await this.userRepository.findOne({ where: { id: friendId, isDeleted: false } });
-    if (!target) throw new HttpException('该用户不存在', 404);
+    if (!target) throw new HttpException({ message: '该用户不存在', i18nKey: 'error.user.notFound' }, 404);
 
     // 检查好友是否存在
     const friend = await this.friendRepository.findOne({
@@ -35,7 +35,7 @@ export class FriendService {
     });
 
     if (friend) {
-      throw new HttpException('好友关系已存在', 409);
+      throw new HttpException({ message: '好友关系已存在', i18nKey: 'error.friend.relationExists' }, 409);
     }
 
     // 创建好友关系
@@ -97,7 +97,7 @@ export class FriendService {
         where: { creator: friend_id, friend_id: creator, isDeleted: false },
       });
       if (!reverse) {
-        throw new HttpException('好友关系不存在', 404);
+        throw new HttpException({ message: '好友关系不存在', i18nKey: 'error.friend.relationNotFound' }, 404);
       }
     }
 

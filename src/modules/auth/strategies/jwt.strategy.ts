@@ -30,7 +30,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       select: ['id', 'username', 'isDeleted'],
     });
     if (!user || user.isDeleted) {
-      throw new UnauthorizedException('账号已失效，请重新登录');
+      throw new UnauthorizedException({ message: '账号已失效，请重新登录', i18nKey: 'error.auth.accountInvalid' });
     }
     return { id: user.id, username: user.username };
   }

@@ -28,10 +28,10 @@ export class MemberService {
       where: { id: createMemberDto.room_id, isDeleted: false },
     });
     if (!room) {
-      throw new HttpException('房间不存在', 404);
+      throw new HttpException({ message: '房间不存在', i18nKey: 'error.apply.roomNotFound' }, 404);
     }
     if (!operatorId || room.creator !== operatorId) {
-      throw new HttpException('只有群主可以添加成员', 403);
+      throw new HttpException({ message: '只有群主可以添加成员', i18nKey: 'error.member.onlyOwnerAdd' }, 403);
     }
 
     // 幂等：已经在房间里就返回原记录，避免重复插入多行成员
@@ -66,16 +66,16 @@ export class MemberService {
     const roomId = query?.room_id;
     const userId = query?.user_id;
     if (!roomId && !userId) {
-      throw new HttpException('缺少 room_id 或 user_id', 400);
+      throw new HttpException({ message: '缺少 room_id 或 user_id', i18nKey: 'error.member.requireUserRoom' }, 400);
     }
     // 群成员名单只对群成员开放，否则任何登录用户都能按 id 批量拉别人的成员表
     if (roomId) {
       const mine = await this.memberRepository.findOne({
         where: { room_id: roomId, user_id: operatorId, isDeleted: false },
       });
-      if (!mine) throw new HttpException('你不是该房间成员', 403);
+      if (!mine) throw new HttpException({ message: '你不是该房间成员', i18nKey: 'error.room.notMember' }, 403);
     } else if (userId !== operatorId) {
-      throw new HttpException('只能查询自己的成员关系', 403);
+      throw new HttpException({ message: '只能查询自己的成员关系', i18nKey: 'error.member.onlySelfQuery' }, 403);
     }
 
     const where: any = { isDeleted: false };
@@ -117,20 +117,20 @@ export class MemberService {
       relations: ['room_info'],
     });
     if (!member) {
-      throw new HttpException('该成员不存在', 404);
+      throw new HttpException({ message: '该成员不存在', i18nKey: 'error.member.notFound' }, 404);
     }
 
     const isSelf = !!operatorId && member.user_id === operatorId;
     const isOwner = !!operatorId && member.room_info?.creator === operatorId;
     if (!operatorId || (!isSelf && !isOwner)) {
-      throw new HttpException('只有群主可以移出成员', 403);
+      throw new HttpException({ message: '只有群主可以移出成员', i18nKey: 'error.member.onlyOwnerRemove' }, 403);
     }
 
     // M-2：群主不能以「退出房间」的方式离开。否则会留下「已不在成员表、但 room.creator
     // 仍是他」的幽灵管理员——收不到房间消息、却仍能改名/解散，房间也无人能正常接管。
     // 群主要离开必须先解散房间（前端群主按钮本就是「解散房间」，这里防直接调 API）。
     if (isSelf && isOwner) {
-      throw new HttpException('群主不能直接退出房间，请先解散房间', 409);
+      throw new HttpException({ message: '群主不能直接退出房间，请先解散房间', i18nKey: 'error.member.ownerCannotLeave' }, 409);
     }
 
     member.isDeleted = true;

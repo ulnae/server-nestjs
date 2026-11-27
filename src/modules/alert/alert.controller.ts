@@ -28,14 +28,14 @@ export class AlertController {
     sendAlert(@Body() dto: { message: string, sender?: string }, @Headers('x-alert-secret') secret?: string) {
         const expected = this.configService.get<string>('ALERT_SECRET');
         if (!expected) {
-            throw new HttpException('系统广播未启用：请先配置 ALERT_SECRET', 403);
+            throw new HttpException({ message: '系统广播未启用：请先配置 ALERT_SECRET', i18nKey: 'error.alert.disabled' }, 403);
         }
         if (!secret || secret !== expected) {
-            throw new HttpException('无权发送系统广播', 403);
+            throw new HttpException({ message: '无权发送系统广播', i18nKey: 'error.alert.forbidden' }, 403);
         }
 
         const message = String((dto && dto.message) || '').trim();
-        if (!message) throw new HttpException('缺少 message', 400);
+        if (!message) throw new HttpException({ message: '缺少 message', i18nKey: 'error.alert.missingMessage' }, 400);
 
         this.socketGateway.wss.emit(Event.SYSTEM_ALERT, {
             senderName: (dto && dto.sender) || '系统通知',

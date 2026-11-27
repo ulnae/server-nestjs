@@ -32,11 +32,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
       ? exception.message
       : `${status >= 500 ? 'Service Error' : 'Client Error'}`;
 
-    const errorResponse = {
+    // i18n：业务异常通过对象形式响应携带 i18nKey / i18nParams，前端按 key 显示多语言文案
+    const errorResponse: Record<string, any> = {
       code: -1,
       data: null,
       msg: validMessage || message,
     };
+    if (typeof exceptionResponse === 'object' && typeof exceptionResponse.i18nKey === 'string') {
+      errorResponse.i18nKey = exceptionResponse.i18nKey;
+      if (exceptionResponse.i18nParams !== undefined) {
+        errorResponse.i18nParams = exceptionResponse.i18nParams;
+      }
+    }
 
     // 设置返回的状态码， 请求头，发送错误信息
     response.status(status);

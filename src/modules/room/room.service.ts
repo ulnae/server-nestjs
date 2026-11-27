@@ -26,7 +26,7 @@ export class RoomService {
     // 表上 name 是唯一索引（含已软删的行）：不先查一次，同名房间会直接抛 SQL 错误变成 500
     const duplicated = await this.roomRepository.findOne({ where: { name: createRoomDto.name } });
     if (duplicated) {
-      throw new HttpException('房间名称已被使用（含已解散的房间），换一个名字吧', 400);
+      throw new HttpException({ message: '房间名称已被使用（含已解散的房间），换一个名字吧', i18nKey: 'error.room.nameTakenWithDeleted' }, 400);
     }
     const room = await this.roomRepository.save(Object.assign({}, createRoomDto, {
       creator: user.id,
@@ -180,14 +180,14 @@ export class RoomService {
       relations: ['user_info']
     });
     if (!room) {
-      throw new HttpException(`id为${id}的房间不存在`, 404);
+      throw new HttpException({ message: `id为${id}的房间不存在`, i18nKey: 'error.room.notFoundId', i18nParams: { id } }, 404);
     }
     // 与 worker 保持一致：群资料只对群成员开放，否则任何登录用户都能按 id 枚举群名与群主邮箱
     if (operatorId) {
       const member = await this.memberRepository.findOne({
         where: { room_id: id, user_id: operatorId, isDeleted: false },
       });
-      if (!member) throw new HttpException('你不是该房间成员', 403);
+      if (!member) throw new HttpException({ message: '你不是该房间成员', i18nKey: 'error.room.notMember' }, 403);
     }
     return room;
   }
@@ -200,21 +200,21 @@ export class RoomService {
       } 
     });
     if (!room) {
-      throw new HttpException(`id为${id}的房间不存在`, 404);
+      throw new HttpException({ message: `id为${id}的房间不存在`, i18nKey: 'error.room.notFoundId', i18nParams: { id } }, 404);
     }
     // 契约里写的是「群主」：缺这行判断等于任何登录用户都能改别人群的名称与公告
     if (!operatorId || room.creator !== operatorId) {
-      throw new HttpException('只有群主可以修改房间信息', 403);
+      throw new HttpException({ message: '只有群主可以修改房间信息', i18nKey: 'error.room.onlyOwnerUpdate' }, 403);
     }
     const updateRoomDtoCopy = { ...updateRoomDto };
     // 用 !== undefined 而不是真值判断：否则把群公告清空（传空串）会被静默忽略
     if (updateRoomDtoCopy.name !== undefined) {
       const name = String(updateRoomDtoCopy.name).trim();
-      if (!name) throw new HttpException('房间名称不能为空', 400);
+      if (!name) throw new HttpException({ message: '房间名称不能为空', i18nKey: 'error.room.nameRequired' }, 400);
       if (name !== room.name) {
         const duplicated = await this.roomRepository.findOne({ where: { name } });
         if (duplicated && duplicated.id !== id) {
-          throw new HttpException('房间名称已被使用，换一个名字吧', 400);
+          throw new HttpException({ message: '房间名称已被使用，换一个名字吧', i18nKey: 'error.room.nameTaken' }, 400);
         }
       }
       updateRoomDtoCopy.name = name;
@@ -242,10 +242,10 @@ export class RoomService {
       } 
     });
     if (!room) {
-      throw new HttpException(`id为${id}的房间不存在`, 404);
+      throw new HttpException({ message: `id为${id}的房间不存在`, i18nKey: 'error.room.notFoundId', i18nParams: { id } }, 404);
     }
     if (!operatorId || room.creator !== operatorId) {
-      throw new HttpException('只有群主可以解散房间', 403);
+      throw new HttpException({ message: '只有群主可以解散房间', i18nKey: 'error.room.onlyOwnerDelete' }, 403);
     }
 
     const roomName = room.name;

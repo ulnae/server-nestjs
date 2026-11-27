@@ -52,7 +52,7 @@ export class ApplyService {
     const roomId = createApplyDto.room_id;
     const applyUserId = createApplyDto.apply_user_id;
     if (!roomId && !applyUserId) {
-      throw new HttpException('缺少 room_id 或 apply_user_id', 400);
+      throw new HttpException({ message: '缺少 room_id 或 apply_user_id', i18nKey: 'error.apply.requireParams' }, 400);
     }
 
     // 重复申请去重（注意不要污染 DTO：用新对象组装 where）
@@ -60,27 +60,27 @@ export class ApplyService {
       where: Object.assign({}, createApplyDto, { user_id, isDeleted: false, handle_status: false }),
     })
     if (apply) {
-      throw new HttpException('已存在相同申请', 409);
+      throw new HttpException({ message: '已存在相同申请', i18nKey: 'error.apply.duplicate' }, 409);
     }
 
     // H-2：校验目标有效性，与 worker 侧 routes/apply.js create 完全对齐，
     // 避免给自己发好友申请、给不存在的用户/房间发申请、重复加好友/入群产生僵尸待办。
     if (roomId) {
       const room = await this.roomRepository.findOne({ where: { id: roomId, isDeleted: false } });
-      if (!room) throw new HttpException('房间不存在', 404);
+      if (!room) throw new HttpException({ message: '房间不存在', i18nKey: 'error.apply.roomNotFound' }, 404);
       const alreadyMember = await this.memberRepository.findOne({
         where: { room_id: roomId, user_id, isDeleted: false },
       });
-      if (alreadyMember) throw new HttpException('你已经是该房间成员', 409);
+      if (alreadyMember) throw new HttpException({ message: '你已经是该房间成员', i18nKey: 'error.apply.alreadyMember' }, 409);
     }
     if (applyUserId) {
-      if (applyUserId === user_id) throw new HttpException('不能添加自己为好友', 400);
+      if (applyUserId === user_id) throw new HttpException({ message: '不能添加自己为好友', i18nKey: 'error.friend.cannotAddSelf' }, 400);
       const target = await this.userRepository.findOne({ where: { id: applyUserId, isDeleted: false } });
-      if (!target) throw new HttpException('该用户不存在', 404);
+      if (!target) throw new HttpException({ message: '该用户不存在', i18nKey: 'error.user.notFound' }, 404);
       const befriended = await this.friendRepository.findOne({
         where: { creator: user_id, friend_id: applyUserId, isDeleted: false },
       });
-      if (befriended) throw new HttpException('你们已经是好友了', 409);
+      if (befriended) throw new HttpException({ message: '你们已经是好友了', i18nKey: 'error.friend.alreadyFriends' }, 409);
     }
 
     const saved = await this.applyRepository.save(Object.assign({}, createApplyDto, { user_id }));
@@ -147,18 +147,18 @@ export class ApplyService {
       relations: ['user_info', 'room_info', 'apply_user_info'],
     });
     if (!apply) {
-      throw new HttpException('申请不存在', 404);
+      throw new HttpException({ message: '申请不存在', i18nKey: 'error.apply.notFound' }, 404);
     }
     if (apply.handle_status) {
-      throw new HttpException('已处理，不能再操作', 409);
+      throw new HttpException({ message: '已处理，不能再操作', i18nKey: 'error.apply.alreadyHandled' }, 409);
     }
 
     // 审批权限校验
     if (apply.apply_user_id && apply.apply_user_id !== userId) {
-      throw new HttpException('不是被申请人，不能操作', 403);
+      throw new HttpException({ message: '不是被申请人，不能操作', i18nKey: 'error.apply.notReceiver' }, 403);
     }
     if (apply.room_id && apply.room_info?.creator !== userId) {
-      throw new HttpException('不是房间创建人，不能操作', 403);
+      throw new HttpException({ message: '不是房间创建人，不能操作', i18nKey: 'error.apply.notRoomOwner' }, 403);
     }
 
     // H-3：条件更新抢占 —— 只有 handle_status=false 的那个请求能把申请置为已处理。
@@ -171,7 +171,7 @@ export class ApplyService {
       { status, handle_status: true },
     );
     if (!result.affected) {
-      throw new HttpException('已处理，不能再操作', 409);
+      throw new HttpException({ message: '已处理，不能再操作', i18nKey: 'error.apply.alreadyHandled' }, 409);
     }
 
     // 抢占成功后才写入关系。NestJS 的 friend/member 表没有 worker 那样的部分唯一索引，
@@ -249,14 +249,14 @@ export class ApplyService {
       relations: ['room_info'],
     });
     if (!apply) {
-      throw new HttpException('申请不存在', 404);
+      throw new HttpException({ message: '申请不存在', i18nKey: 'error.apply.notFound' }, 404);
     }
     if (apply.handle_status) {
-      throw new HttpException('已处理，不能再操作', 409);
+      throw new HttpException({ message: '已处理，不能再操作', i18nKey: 'error.apply.alreadyHandled' }, 409);
     }
     // 只能撤回自己发起的申请（与 worker 侧行为对齐）
     if (!operatorId || apply.user_id !== operatorId) {
-      throw new HttpException('只能撤回自己发起的申请', 403);
+      throw new HttpException({ message: '只能撤回自己发起的申请', i18nKey: 'error.apply.onlySelfRevoke' }, 403);
     }
     const saved = await this.applyRepository.save(Object.assign(apply, { isDeleted: true }));
 

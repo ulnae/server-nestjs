@@ -28,7 +28,7 @@ export class UserService {
    * 之前这里抛 401，被前端 axios 拦截器当成「登录失效」直接登出；
    * 外层的 try/catch 又会把所有异常重写成 401，等于把状态码彻底吞掉。
    */
-  async findeByWhere(where: object, errMsg: string, excludeId?: string) {
+  async findeByWhere(where: object, errMsg: string | object, excludeId?: string) {
     const queryUser = await this.userRepository.findOne({ where: { ...where } });
     if (queryUser && queryUser.id !== excludeId) {
       throw new HttpException(errMsg, 409);
@@ -36,8 +36,12 @@ export class UserService {
   }
 
   async create(createUserDto: CreateUserDto): Promise<string> {
-    await this.findeByWhere({ username: createUserDto.username }, '用户名已存在');
-    await this.findeByWhere({ email: createUserDto.email }, '邮箱已被注册');
+    await this.findeByWhere({ username: createUserDto.username }, {
+      message: '用户名已存在', i18nKey: 'error.user.usernameTaken',
+    });
+    await this.findeByWhere({ email: createUserDto.email }, {
+      message: '邮箱已被注册', i18nKey: 'error.user.emailTaken',
+    });
 
     // 显式挑字段：captcha 只用于校验，不能跟着 save 落库
     await this.userRepository.save({
@@ -78,7 +82,7 @@ export class UserService {
   async findOne(id: string): Promise<UserInfo> {
     const userInfo = await this.userRepository.findOne({ where: { id, isDeleted: false }, select: ['username', 'id', 'email', 'createdAt', 'updatedAt'] })
     if (!userInfo) {
-      throw new HttpException('该用户不存在', 404);
+      throw new HttpException({ message: '该用户不存在', i18nKey: 'error.user.notFound' }, 404);
     }
     return userInfo
   }
@@ -86,11 +90,11 @@ export class UserService {
   async update(id: string, updateUserDto: UpdateUserDto, user: UserInfo) {
     const existUser = await this.userRepository.findOne({ where: { id, isDeleted: false } });
     if (!existUser) {
-      throw new HttpException(`id为${id}的用户不存在`, 404);
+      throw new HttpException({ message: `id为${id}的用户不存在`, i18nKey: 'error.user.notFoundId', i18nParams: { id } }, 404);
     }
 
     if (user.id !== id) {
-      throw new HttpException('您没有权限更新该用户', 403);
+      throw new HttpException({ message: '您没有权限更新该用户', i18nKey: 'error.user.noUpdatePermission' }, 403);
     }
 
     /* 一次更新用户名 / 邮箱 / 密码。
@@ -102,7 +106,7 @@ export class UserService {
     const wantEmail = !!email && email !== existUser.email;
     if (wantPassword || wantEmail) {
       if (!oldPassword || !(await bcrypt.compare(oldPassword, existUser.password))) {
-        throw new HttpException('原密码错误', 400);
+        throw new HttpException({ message: '原密码错误', i18nKey: 'error.user.oldPassWrong' }, 400);
       }
     }
 
@@ -117,7 +121,7 @@ export class UserService {
     }
     if (wantPassword) {
       if (password.length < 6 || password.length > 32) {
-        throw new HttpException('密码长度需为 6-32 位', 400);
+        throw new HttpException({ message: '密码长度需为 6-32 位', i18nKey: 'error.user.passLenInvalid' }, 400);
       }
       updatePost.password = await bcrypt.hash(password, 8);
     }
@@ -130,11 +134,11 @@ export class UserService {
   async remove(id: string, operatorId?: string) {
     const existUser = await this.userRepository.findOne({ where: { id, isDeleted: false } });
     if (!existUser) {
-      throw new HttpException(`id为${id}的用户不存在`, 404);
+      throw new HttpException({ message: `id为${id}的用户不存在`, i18nKey: 'error.user.notFoundId', i18nParams: { id } }, 404);
     }
     // 只能注销自己：否则任何登录用户都能把别人的账号软删掉
     if (!operatorId || operatorId !== id) {
-      throw new HttpException('您没有权限删除该用户', 403);
+      throw new HttpException({ message: '您没有权限删除该用户', i18nKey: 'error.user.noDeletePermission' }, 403);
     }
     existUser.isDeleted = true;
     await this.userRepository.save(existUser);
@@ -151,13 +155,13 @@ export class UserService {
     // 1. 查询用户是否存在
     const user = await this.userRepository.findOne({ where: { username, isDeleted: false } });
     if (!user) {
-      throw new HttpException('用户名或密码错误', 401);
+      throw new HttpException({ message: '用户名或密码错误', i18nKey: 'error.user.userOrPassWrong' }, 401);
     }
 
     // 2. 验证密码（假设密码在数据库中是加密存储的）
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
-      throw new HttpException('用户名或密码错误', 401);
+      throw new HttpException({ message: '用户名或密码错误', i18nKey: 'error.user.userOrPassWrong' }, 401);
     }
 
     

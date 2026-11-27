@@ -1,4 +1,4 @@
-import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, Logger } from '@nestjs/common';
 import { Socket } from 'socket.io';
 import { Event } from '@/socket/events';
 
@@ -16,12 +16,18 @@ export class WsExceptionFilter implements ExceptionFilter {
     const client = host.switchToWs().getClient<Socket>();
     const pattern = host.switchToWs().getPattern?.();
 
+    // i18n：WsException 支持对象形式 { message, i18nKey, i18nParams }，把 key 一并带给前端
     let message = '操作失败，请稍后重试';
-    if (exception instanceof HttpException) {
-      const response = exception.getResponse() as any;
-      if (typeof response === 'string') message = response;
-      else if (response && typeof response.message === 'string') message = response.message;
+    let i18nKey = 'error.common.retryLater';
+    let i18nParams: Record<string, any> | undefined;
+    const response = exception?.getResponse?.();
+    if (typeof response === 'string') {
+      message = response;
+    } else if (response && typeof response === 'object') {
+      if (typeof response.message === 'string') message = response.message;
       else if (Array.isArray(response?.message)) message = response.message.join('；');
+      if (typeof response.i18nKey === 'string') i18nKey = response.i18nKey;
+      if (response.i18nParams !== undefined) i18nParams = response.i18nParams;
     } else if (exception && typeof exception.message === 'string' && exception.message) {
       message = exception.message;
     }
@@ -32,6 +38,8 @@ export class WsExceptionFilter implements ExceptionFilter {
       client.emit(Event.EXCEPTION, {
         event: pattern,
         message,
+        i18nKey,
+        ...(i18nParams ? { i18nParams } : {}),
         timestamp: Date.now(),
       });
     } catch {

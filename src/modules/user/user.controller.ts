@@ -222,6 +222,7 @@ export class UserController {
       throw new HttpException({
         code: 500,
         message: '文件上传失败',
+        i18nKey: 'error.upload.failed',
         error: error.message,
       }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
