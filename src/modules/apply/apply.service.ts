@@ -161,44 +161,68 @@ export class ApplyService {
       throw new HttpException({ message: '不是房间创建人，不能操作', i18nKey: 'error.apply.notRoomOwner' }, 403);
     }
 
-    // H-3：条件更新抢占 —— 只有 handle_status=false 的那个请求能把申请置为已处理。
-    // 并发双击 / 脚本同时提交时，仅一个请求的 affected=1，其余拿不到锁直接 409，
-    // 从根上避免两个请求都通过前置检查后重复建好友/成员关系、重复推送。
-    // 只更新这两个字段：DTO 无 whitelist，透传会把 user_id / room_id 一起写进去。
+    // H-3 + 数据一致性：抢占与关系写入必须在同一个事务里。
+    // 两步各自提交时，一旦关系写入失败，就会出现「申请已同意但成员/好友关系不存在」的脏数据
+    // （线上 admin 加入吃瓜群即因此房间列表与成员列表同时看不到对方）。
     const status = !!updateApplyDto.status;
-    const result = await this.applyRepository.update(
-      { id, isDeleted: false, handle_status: false },
-      { status, handle_status: true },
-    );
-    if (!result.affected) {
-      throw new HttpException({ message: '已处理，不能再操作', i18nKey: 'error.apply.alreadyHandled' }, 409);
-    }
+    try {
+      await this.applyRepository.manager.transaction(async (manager) => {
+        // 只更新这两个字段：DTO 无 whitelist，透传会把 user_id / room_id 一起写进去。
+        const result = await manager.update(
+          ApplyEntity,
+          { id, isDeleted: false, handle_status: false },
+          { status, handle_status: true },
+        );
+        if (!result.affected) {
+          throw new HttpException({ message: '已处理，不能再操作', i18nKey: 'error.apply.alreadyHandled' }, 409);
+        }
 
-    // 抢占成功后才写入关系。NestJS 的 friend/member 表没有 worker 那样的部分唯一索引，
-    // 这里用「先查后写」的幂等检查兜底（跨来源的重复关系不会因本接口并发而产生）。
-    if (apply.apply_user_id && status) {
-      const pairs = [
-        { creator: apply.apply_user_id, friend_id: apply.user_id },
-        { creator: apply.user_id, friend_id: apply.apply_user_id },
-      ];
-      for (const pair of pairs) {
-        const exists = await this.friendRepository.findOne({
-          where: { ...pair, isDeleted: false },
-        });
-        if (!exists) await this.friendRepository.save(pair);
-      }
-    }
+        // 抢占成功后才写入关系（事务内先查后写，防重复）
+        if (apply.apply_user_id && status) {
+          const friendRepo = manager.getRepository(FriendEntity);
+          const pairs = [
+            { creator: apply.apply_user_id, friend_id: apply.user_id },
+            { creator: apply.user_id, friend_id: apply.apply_user_id },
+          ];
+          for (const pair of pairs) {
+            const exists = await friendRepo.findOne({ where: { ...pair, isDeleted: false } });
+            if (!exists) await friendRepo.save(pair);
+          }
+        }
 
-    if (apply.room_id && status) {
-      const exists = await this.memberRepository.findOne({
-        where: { room_id: apply.room_id, user_id: apply.user_id, isDeleted: false },
+        if (apply.room_id && status) {
+          const memberRepo = manager.getRepository(MemberEntity);
+          const exists = await memberRepo.findOne({
+            where: { room_id: apply.room_id, user_id: apply.user_id, isDeleted: false },
+          });
+          if (!exists) {
+            await memberRepo.save({ room_id: apply.room_id, user_id: apply.user_id });
+          }
+        }
+
+        // 兜底：事务提交前确认关系真实存在，否则抛错让整个事务回滚
+        if (status) {
+          const relation = apply.apply_user_id
+            ? await manager.getRepository(FriendEntity).findOne({
+              where: { creator: apply.apply_user_id, friend_id: apply.user_id, isDeleted: false },
+            })
+            : await manager.getRepository(MemberEntity).findOne({
+              where: { room_id: apply.room_id, user_id: apply.user_id, isDeleted: false },
+            });
+          if (!relation) {
+            throw new HttpException(
+              { message: '关系建立失败，申请已回滚，请重试', i18nKey: 'error.apply.relationFailed' },
+              500,
+            );
+          }
+        }
       });
-      if (!exists) {
-        await this.memberRepository.save({
-          room_id: apply.room_id,
-          user_id: apply.user_id,
-        });
-      }
+    } catch (err) {
+      if (err instanceof HttpException) throw err;
+      throw new HttpException(
+        { message: '审批写入失败，请稍后重试', i18nKey: 'error.apply.writeFailed' },
+        500,
+      );
     }
 
     // 实时通知申请人处理结果（事件名与 worker 侧一致）
@@ -239,7 +263,7 @@ export class ApplyService {
       }
     }
 
-    return result;
+    return { affected: 1 };
   }
 
   async remove(id: string, operatorId?: string) {
