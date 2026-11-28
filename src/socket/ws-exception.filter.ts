@@ -15,6 +15,9 @@ export class WsExceptionFilter implements ExceptionFilter {
   catch(exception: any, host: ArgumentsHost): void {
     const client = host.switchToWs().getClient<Socket>();
     const pattern = host.switchToWs().getPattern?.();
+    // 消息类事件携带 clientId，回执带上它让前端能把对应乐观消息置为失败
+    const payload = host.switchToWs().getData<{ clientId?: string }>();
+    const clientId = payload && payload.clientId;
 
     // i18n：WsException 支持对象形式 { message, i18nKey, i18nParams }，把 key 一并带给前端
     let message = '操作失败，请稍后重试';
@@ -40,6 +43,7 @@ export class WsExceptionFilter implements ExceptionFilter {
         message,
         i18nKey,
         ...(i18nParams ? { i18nParams } : {}),
+        ...(clientId ? { clientId } : {}),
         timestamp: Date.now(),
       });
     } catch {
